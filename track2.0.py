@@ -18,6 +18,15 @@ from tkinter import ttk, messagebox, filedialog
 SQUADRA_1 = ["Giulio Graziotti", "Iacovino"]
 SQUADRA_2 = ["Giocatore 3", "Giocatore 4"]
 NOMI_SQUADRE = ["Casa", "Fuori"]
+LATI_GIOCO = ["Destra", "Sinistra"]
+# Assegnazione iniziale modificabile anche dall'interfaccia prima del primo punto.
+# Ogni coppia deve avere un giocatore a Destra e uno a Sinistra.
+LATI_GIOCATORI_DEFAULT = {
+    SQUADRA_1[0]: "Destra",
+    SQUADRA_1[1]: "Sinistra",
+    SQUADRA_2[0]: "Destra",
+    SQUADRA_2[1]: "Sinistra",
+}
 
 ESITI = ["Winner", "Errore forzato", "Errore non forzato"]
 ESITO_IN_GIOCO = "In gioco"
@@ -43,8 +52,8 @@ class PadelTracker:
     def __init__(self, root):
         self.root = root
         self.root.title("Padel — statistiche e punteggio")
-        self.root.geometry("980x750")
-        self.root.minsize(800, 660)
+        self.root.geometry("1080x820")
+        self.root.minsize(900, 720)
 
         self.giocatori = SQUADRA_1 + SQUADRA_2
         if len(self.giocatori) != 4 or len(set(self.giocatori)) != 4:
@@ -69,6 +78,22 @@ class PadelTracker:
         self.star_point_pending = False
         self.set_scores = []
         self.partita_finita = False
+
+        # Il battitore va impostato manualmente per ogni game. Il valore viene
+        # fissato quando inizia il primo colpo dello scambio, così non cambia
+        # a metà punto.
+        self.server_var = tk.StringVar(value=SQUADRA_1[0])
+        self.server_del_punto = None
+        # La battuta parte da Destra a inizio game e poi alterna Destra/Sinistra
+        # punto per punto. In un tie-break alterna a ogni punto senza reset.
+        self.lato_servizio_corrente = "Destra"
+        self.lato_servizio_del_punto = None
+        self.lati_giocatori = {
+            nome: LATI_GIOCATORI_DEFAULT.get(nome, "Destra") for nome in self.giocatori
+        }
+        self.var_lati_giocatori = {}
+        self.menu_lati_giocatori = {}
+        self.assist_stats = {nome: 0 for nome in self.giocatori}
 
         # Le azioni intermedie si accumulano qui finché non si chiude il punto.
         self.scambio_corrente = []
@@ -112,6 +137,27 @@ class PadelTracker:
         )
         self.label_stato.pack(pady=(3, 0))
 
+        servizio_frame = ttk.LabelFrame(self.root, text="Servizio — dati per le statistiche", padding=8)
+        servizio_frame.pack(fill="x", padx=18, pady=(3, 7))
+        ttk.Label(servizio_frame, text="Giocatore al servizio nel game corrente:").pack(side="left", padx=(3, 8))
+        self.menu_server = ttk.Combobox(
+            servizio_frame,
+            textvariable=self.server_var,
+            values=self.giocatori,
+            state="readonly",
+            width=24,
+        )
+        self.menu_server.pack(side="left", padx=4)
+        ttk.Label(
+            servizio_frame,
+            text="Seleziona il battitore prima del punto; durante lo scambio resta bloccato. Nel tie-break aggiornalo a ogni cambio turno.",
+            wraplength=380,
+        ).pack(side="left", padx=10)
+        self.label_lato_servizio = ttk.Label(
+            servizio_frame, text="Prossima battuta: Destra", font=("TkDefaultFont", 10, "bold")
+        )
+        self.label_lato_servizio.pack(side="right", padx=8)
+
         squadre_frame = ttk.Frame(self.root)
         squadre_frame.pack(fill="x", padx=18, pady=(10, 6))
         self.bottoni_giocatori = {}
@@ -128,18 +174,36 @@ class PadelTracker:
             squadre_frame.columnconfigure(colonna, weight=1)
 
             for nome in nomi:
+                riga_giocatore = ttk.Frame(gruppo)
+                riga_giocatore.pack(fill="x", pady=4)
                 bottone = ttk.Button(
-                    gruppo,
+                    riga_giocatore,
                     text=nome,
                     command=lambda n=nome: self._apri_inserimento(n),
                 )
-                bottone.pack(fill="x", pady=5, ipady=7)
+                bottone.pack(side="left", fill="x", expand=True, ipady=6)
+                ttk.Label(riga_giocatore, text="Lato:").pack(side="left", padx=(10, 3))
+                lato_var = tk.StringVar(value=self.lati_giocatori[nome])
+                menu_lato = ttk.Combobox(
+                    riga_giocatore,
+                    textvariable=lato_var,
+                    values=LATI_GIOCO,
+                    state="readonly",
+                    width=10,
+                )
+                menu_lato.pack(side="right")
+                menu_lato.bind(
+                    "<<ComboboxSelected>>",
+                    lambda _event, n=nome, v=lato_var: self._cambia_lato_giocatore(n, v.get()),
+                )
+                self.var_lati_giocatori[nome] = lato_var
+                self.menu_lati_giocatori[nome] = menu_lato
                 self.bottoni_giocatori[nome] = bottone
 
         istruzioni = (
-            "Per ogni colpo: scegli prima il colpo. Se lo scambio prosegue, premi "
-            "'Continua scambio'. Se il colpo chiude il punto, seleziona l'esito e "
-            "premi 'Chiudi punto'. Solo la chiusura del punto aggiorna il punteggio."
+            "Imposta Destra/Sinistra per ciascun giocatore prima di iniziare; dopo il primo colpo i lati si bloccano. "
+            "La battuta alterna Destra/Sinistra a ogni punto e riparte da Destra a ogni game. "
+            "Per ogni colpo scegli prima il colpo; usa 'Continua scambio' oppure seleziona l'esito e premi 'Chiudi punto'."
         )
         ttk.Label(
             self.root,
@@ -229,6 +293,30 @@ class PadelTracker:
         )
         menu_esito.grid(row=2, column=1, sticky="ew", pady=7)
 
+        squadra_giocatore = self.squadra_giocatore[giocatore]
+        compagni = [n for n in self.giocatori if self.squadra_giocatore[n] == squadra_giocatore and n != giocatore]
+        ttk.Label(contenuto, text="3. Assist (facoltativo, solo per Winner):").grid(
+            row=3, column=0, sticky="w", pady=7, padx=(0, 12)
+        )
+        assist_var = tk.StringVar(value="")
+        menu_assist = ttk.Combobox(
+            contenuto,
+            textvariable=assist_var,
+            values=("", *compagni),
+            state="disabled",
+            width=28,
+        )
+        menu_assist.grid(row=3, column=1, sticky="ew", pady=7)
+
+        def aggiorna_assist(_event=None):
+            if esito_var.get() == "Winner":
+                menu_assist.configure(state="readonly")
+            else:
+                assist_var.set("")
+                menu_assist.configure(state="disabled")
+
+        menu_esito.bind("<<ComboboxSelected>>", aggiorna_assist)
+
         ttk.Label(
             contenuto,
             text=(
@@ -236,7 +324,7 @@ class PadelTracker:
                 "Chiudi punto = registra Winner/Errore e aggiorna il punteggio."
             ),
             justify="left",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 12))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 12))
 
         def continua_scambio():
             colpo = colpo_var.get()
@@ -271,11 +359,12 @@ class PadelTracker:
                     parent=finestra,
                 )
                 return
-            self._concludi_punto(giocatore, esito, colpo)
+            assistente = assist_var.get().strip() if esito == "Winner" else None
+            self._concludi_punto(giocatore, esito, colpo, assistente=assistente or None)
             finestra.destroy()
 
         pulsanti = ttk.Frame(contenuto)
-        pulsanti.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        pulsanti.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(
             pulsanti, text="Annulla", command=finestra.destroy
         ).pack(side="right", padx=(6, 0))
@@ -303,6 +392,10 @@ class PadelTracker:
             "cronologia_punti": copy.deepcopy(self.cronologia_punti),
             "scambio_corrente": copy.deepcopy(self.scambio_corrente),
             "punteggio_prima_scambio": copy.deepcopy(self.punteggio_prima_scambio),
+            "server_del_punto": self.server_del_punto,
+            "lato_servizio_corrente": self.lato_servizio_corrente,
+            "lato_servizio_del_punto": self.lato_servizio_del_punto,
+            "assist_stats": copy.deepcopy(self.assist_stats),
         }
 
     def _ripristina_snapshot(self, snapshot):
@@ -319,10 +412,42 @@ class PadelTracker:
         self.cronologia_punti = copy.deepcopy(snapshot["cronologia_punti"])
         self.scambio_corrente = copy.deepcopy(snapshot["scambio_corrente"])
         self.punteggio_prima_scambio = copy.deepcopy(snapshot["punteggio_prima_scambio"])
+        self.server_del_punto = snapshot.get("server_del_punto")
+        self.lato_servizio_corrente = snapshot.get("lato_servizio_corrente", "Destra")
+        self.lato_servizio_del_punto = snapshot.get("lato_servizio_del_punto")
+        self.assist_stats = copy.deepcopy(snapshot.get("assist_stats", self.assist_stats))
+
+    def _cambia_lato_giocatore(self, nome, nuovo_lato):
+        """Assegna il lato di gioco; se serve, scambia automaticamente il lato del compagno."""
+        if nuovo_lato not in LATI_GIOCO:
+            return
+        self.lati_giocatori[nome] = nuovo_lato
+        indice_squadra = self.squadra_giocatore[nome]
+        compagno = next(
+            n for n in self.giocatori
+            if self.squadra_giocatore[n] == indice_squadra and n != nome
+        )
+        if self.lati_giocatori.get(compagno) == nuovo_lato:
+            altro_lato = "Sinistra" if nuovo_lato == "Destra" else "Destra"
+            self.lati_giocatori[compagno] = altro_lato
+            self.var_lati_giocatori[compagno].set(altro_lato)
+
+    def _giocatore_in_risposta(self, giocatore_al_servizio, lato_servizio):
+        """Il ricevitore è il giocatore della coppia avversaria sul lato del servizio."""
+        squadra_servizio = self.squadra_giocatore[giocatore_al_servizio]
+        squadra_risposta = 1 - squadra_servizio
+        ricevitori = [
+            nome for nome in self.giocatori
+            if self.squadra_giocatore[nome] == squadra_risposta
+            and self.lati_giocatori.get(nome) == lato_servizio
+        ]
+        return ricevitori[0] if len(ricevitori) == 1 else None
 
     def _inizia_scambio_se_necessario(self):
         if not self.scambio_corrente and self.punteggio_prima_scambio is None:
             self.punteggio_prima_scambio = self._stato_punteggio()
+            self.server_del_punto = self.server_var.get()
+            self.lato_servizio_del_punto = self.lato_servizio_corrente
 
     def _registra_colpo_in_gioco(self, giocatore, colpo):
         """Registra un colpo intermedio senza assegnare il punto."""
@@ -345,7 +470,7 @@ class PadelTracker:
         })
         self._aggiorna_punteggio()
 
-    def _concludi_punto(self, giocatore, esito, colpo):
+    def _concludi_punto(self, giocatore, esito, colpo, assistente=None):
         """Registra il colpo decisivo, assegna il punto e salva il rally completo."""
         if self.partita_finita:
             return
@@ -358,17 +483,41 @@ class PadelTracker:
         self.stats[giocatore][esito][colpo] += 1
         squadra_giocatore = self.squadra_giocatore[giocatore]
         squadra_punto = squadra_giocatore if esito == "Winner" else 1 - squadra_giocatore
+        if esito != "Winner":
+            assistente = None
+        if assistente and (
+            assistente not in self.giocatori
+            or assistente == giocatore
+            or self.squadra_giocatore.get(assistente) != squadra_giocatore
+        ):
+            assistente = None
+        if assistente:
+            self.assist_stats[assistente] = self.assist_stats.get(assistente, 0) + 1
+        giocatore_al_servizio = self.server_del_punto or self.server_var.get()
+        lato_servizio = self.lato_servizio_del_punto or self.lato_servizio_corrente
+        squadra_servizio_idx = self.squadra_giocatore[giocatore_al_servizio]
+        squadra_al_servizio = NOMI_SQUADRE[squadra_servizio_idx]
+        giocatore_in_risposta = self._giocatore_in_risposta(giocatore_al_servizio, lato_servizio)
+        squadra_in_risposta_idx = 1 - squadra_servizio_idx
+        squadra_in_risposta = NOMI_SQUADRE[squadra_in_risposta_idx]
+        games_prima = self.games.copy()
 
         azione_finale = {
             "numero_azione_nello_scambio": len(self.scambio_corrente) + 1,
             "giocatore": giocatore,
             "colpo": colpo,
             "esito": esito,
+            "assistente": assistente,
             "punto_concluso": True,
         }
         self.scambio_corrente.append(azione_finale)
 
         self._assegna_punto(squadra_punto)
+        # A ogni punto cambia il lato di battuta; dopo un game/set si riparte da Destra.
+        if self.games != games_prima or len(self.set_scores) > numero_set_completati_prima:
+            self.lato_servizio_corrente = "Destra"
+        else:
+            self.lato_servizio_corrente = "Sinistra" if lato_servizio == "Destra" else "Destra"
         stato_dopo = self._stato_punteggio()
         numero_punto = len(self.cronologia_punti) + 1
 
@@ -376,6 +525,7 @@ class PadelTracker:
         riga = (
             f"{stato_prima_punto['punti_game']} | {stato_prima_punto['game']} | "
             f"{stato_prima_punto['set']} | {giocatore} | {esito} | {colpo}"
+            + (f" | Assist: {assistente}" if assistente else "")
         )
         azioni_scambio = copy.deepcopy(self.scambio_corrente)
         riepilogo_scambio = " -> ".join(
@@ -392,7 +542,19 @@ class PadelTracker:
             "giocatore": giocatore,
             "esito": esito,
             "colpo": colpo,
+            "assistente": assistente,
             "squadra_che_fa_punto": NOMI_SQUADRE[squadra_punto],
+            "giocatore_al_servizio": giocatore_al_servizio,
+            "squadra_al_servizio": squadra_al_servizio,
+            "lato_servizio": lato_servizio,
+            "giocatore_in_risposta": giocatore_in_risposta,
+            "squadra_in_risposta": squadra_in_risposta,
+            "punto_vinto_in_servizio": squadra_punto == squadra_servizio_idx,
+            "punto_vinto_in_risposta": squadra_punto != squadra_servizio_idx,
+            "punto_vinto_in_risposta_da_giocatore": bool(
+                giocatore_in_risposta
+                and squadra_punto == self.squadra_giocatore[giocatore_in_risposta]
+            ),
             "punteggio_dopo": stato_dopo,
         }
         if len(self.set_scores) > numero_set_completati_prima:
@@ -401,9 +563,11 @@ class PadelTracker:
         self.cronologia_punti.append(record)
         self.scambio_corrente = []
         self.punteggio_prima_scambio = None
+        self.server_del_punto = None
+        self.lato_servizio_del_punto = None
         self._undo_stack.append({
             "snapshot": snapshot,
-            "descrizione": f"{giocatore} — {esito} — {colpo}",
+            "descrizione": f"{giocatore} — {esito} — {colpo}" + (f" — assist a {assistente}" if assistente else ""),
         })
         self._aggiorna_punteggio()
 
@@ -545,6 +709,7 @@ class PadelTracker:
         )
         self.label_games.configure(text=f"GAME    {self.games[0]}-{self.games[1]}")
         self.label_punti.configure(text=f"PUNTI    {self._testo_punti_game()}")
+        self.label_lato_servizio.configure(text=f"Prossima battuta: {self.lato_servizio_corrente}")
 
         if self.partita_finita:
             stato = "Partita terminata"
@@ -573,6 +738,13 @@ class PadelTracker:
         self.bottone_annulla.configure(
             state="normal" if self._undo_stack else "disabled"
         )
+        # Battitore fisso durante il punto; lato dei giocatori impostabile prima della partita.
+        self.menu_server.configure(
+            state="disabled" if self.scambio_corrente else "readonly"
+        )
+        lati_bloccati = bool(self.cronologia_punti or self.scambio_corrente)
+        for menu_lato in self.menu_lati_giocatori.values():
+            menu_lato.configure(state="disabled" if lati_bloccati else "readonly")
 
     def _annulla_ultima_azione(self):
         """Annulla l'ultima azione (colpo intermedio o chiusura del punto)."""
@@ -650,7 +822,19 @@ class PadelTracker:
                 "set_completati": self.set_scores,
                 "partita_finita": self.partita_finita,
             },
-            "statistiche_aggregate": self.stats,
+            "lati_giocatori": self.lati_giocatori,
+            "assist_aggregate": self.assist_stats,
+            "impostazioni_servizio": {
+                "metodo": "Selezione manuale del giocatore al servizio prima del punto; nel tie-break a ogni cambio turno",
+                "giocatore_selezionato_per_prossimo_punto": self.server_var.get(),
+                "lato_servizio_prossimo_punto": self.lato_servizio_corrente,
+                "alternanza_lato": "Destra/Sinistra a ogni punto; nei game nuovi si riparte da Destra",
+                "metodo_individuazione_risposta": "Giocatore avversario assegnato al lato corrispondente al lato da cui parte il servizio",
+                "nota": (
+                    "Impostare il battitore all'inizio di ogni game e aggiornarlo a ogni cambio turno nel tie-break. I ruoli Destra/Sinistra si impostano "
+                    "prima del primo colpo e vengono salvati nella cronologia per attribuire la risposta individuale."
+                ),
+            },
             "cronologia_punti": {
                 "descrizione_riga": (
                     "Punteggio prima del punto | game | set vinti | "
@@ -666,6 +850,15 @@ class PadelTracker:
                     "esito",
                     "colpo",
                     "squadra_che_fa_punto",
+                    "assistente",
+                    "giocatore_al_servizio",
+                    "squadra_al_servizio",
+                    "lato_servizio",
+                    "giocatore_in_risposta",
+                    "squadra_in_risposta",
+                    "punto_vinto_in_servizio",
+                    "punto_vinto_in_risposta",
+                    "punto_vinto_in_risposta_da_giocatore",
                     "punteggio_dopo",
                     "set_completato_in_questa_azione",
                 ],
