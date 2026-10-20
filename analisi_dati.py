@@ -1,20 +1,17 @@
-"""Dashboard di analisi del Padel Tracker: tabelle e grafici dal JSON esportato.
+"""Analisi delle statistiche del Padel Tracker da file JSON.
+
+Mostra una tabella riepilogativa e una tabella dei colpi per ciascuno dei quattro
+ giocatori. Non richiede librerie esterne.
 
 Avvio: python padel_analisi.py [percorso/file.json]
-Dipendenze: python -m pip install matplotlib
 """
 from __future__ import annotations
+
 import json
 import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-
-try:
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
-except ImportError as exc:
-    raise SystemExit("Per i grafici installa matplotlib: python -m pip install matplotlib") from exc
 
 COLPI_DEFAULT = [
     "Vibora", "Smash", "Bandeja", "Rullo", "Volee dritto", "Volee rovescio",
@@ -34,15 +31,16 @@ def carica_json(percorso: str | Path) -> dict:
 
 
 def normalizza_statistiche(dati: dict):
-    """Restituisce giocatori, colpi e contatori; compatibile anche con vecchi JSON."""
+    """Restituisce giocatori, colpi e contatori; supporta export vecchi e nuovi."""
     squadre = dati.get("squadre", {})
-    giocatori = []
+    giocatori: list[str] = []
     if isinstance(squadre, dict):
         for nomi in squadre.values():
             if isinstance(nomi, list):
                 for nome in nomi:
                     if nome not in giocatori:
                         giocatori.append(nome)
+
     aggregate = dati.get("statistiche_aggregate", {})
     if not giocatori and isinstance(aggregate, dict):
         giocatori = list(aggregate.keys())
@@ -57,30 +55,33 @@ def normalizza_statistiche(dati: dict):
                             if colpo not in colpi:
                                 colpi.append(colpo)
 
-    conteggi = {n: {e: {c: 0 for c in colpi} for e in ESITI} for n in giocatori}
+    conteggi = {nome: {esito: {colpo: 0 for colpo in colpi} for esito in ESITI} for nome in giocatori}
     if isinstance(aggregate, dict) and aggregate:
         for nome in giocatori:
             for esito, by_colpo in aggregate.get(nome, {}).items():
                 if not isinstance(by_colpo, dict):
                     continue
+                conteggi.setdefault(nome, {e: {c: 0 for c in colpi} for e in ESITI})
                 for colpo, valore in by_colpo.items():
                     if colpo not in colpi:
                         colpi.append(colpo)
                         for n in giocatori:
                             for e in ESITI:
-                                conteggi[n][e].setdefault(colpo, 0)
+                                conteggi.setdefault(n, {}).setdefault(e, {}).setdefault(colpo, 0)
                     conteggi[nome].setdefault(esito, {}).setdefault(colpo, 0)
                     try:
                         conteggi[nome][esito][colpo] = int(valore or 0)
                     except (ValueError, TypeError):
                         conteggi[nome][esito][colpo] = 0
     else:
-        # Fallback per eventuali export che contengano la cronologia ma non i totali.
+        # Fallback se l'export contiene cronologia ma non statistiche aggregate.
         history = dati.get("cronologia_punti", {})
         points = history.get("dati", []) if isinstance(history, dict) else []
         for point in points if isinstance(points, list) else []:
             for action in point.get("azioni_scambio", []):
-                nome, colpo, esito = action.get("giocatore"), action.get("colpo"), action.get("esito")
+                nome = action.get("giocatore")
+                colpo = action.get("colpo")
+                esito = action.get("esito")
                 if not nome or not colpo or not esito:
                     continue
                 if nome not in conteggi:
@@ -90,7 +91,7 @@ def normalizza_statistiche(dati: dict):
                     colpi.append(colpo)
                     for n in giocatori:
                         for e in ESITI:
-                            conteggi[n][e].setdefault(colpo, 0)
+                            conteggi[n].setdefault(e, {}).setdefault(colpo, 0)
                 conteggi[nome].setdefault(esito, {}).setdefault(colpo, 0)
                 conteggi[nome][esito][colpo] += 1
 
@@ -103,61 +104,121 @@ def normalizza_statistiche(dati: dict):
     return giocatori, colpi, conteggi
 
 
-def analizza_servizio(dati: dict, giocatori: list[str]) -> dict:
-    """Servizio per battitore; risposta aggregata per squadra (il ricevitore non è registrato)."""
-    squadre = dati.get("squadre", {})
-    giocatore_squadra = {}
-    nomi_squadre = list(squadre.keys()) if isinstance(squadre, dict) else []
-    if isinstance(squadre, dict):
-        for squadra, nomi in squadre.items():
-            if isinstance(nomi, list):
-                for nome in nomi:
-                    giocatore_squadra[nome] = squadra
+def normalizza_assist(dati: dict, giocatori: list[str]) -> dict[str, int]:
+    """Usa il conteggio aggregato; in alternativa conta gli assist in cronologia."""
+    raw = dati.get("assist_aggregate")
+    if isinstance(raw, dict):
+        risultati = {nome: 0 for nome in giocatori}
+        for nome in giocatori:
+            try:
+                risultati[nome] = int(raw.get(nome, 0) or 0)
+            except (ValueError, TypeError):
+                risultati[nome] = 0
+        # L'oggetto esiste solo nelle versioni nuove del tracker: è autorevole.
+        return risultati
+
+    risultati = {nome: 0 for nome in giocatori}
     history = dati.get("cronologia_punti", {})
     points = history.get("dati", []) if isinstance(history, dict) else []
-    serve = {n: {"giocati": 0, "vinti": 0} for n in giocatori}
-    return_by_team = {n: {"giocati": 0, "vinti": 0} for n in nomi_squadre}
-    tracked = 0
     for point in points if isinstance(points, list) else []:
+        assistente = point.get("assistente")
+        if assistente:
+            risultati[assistente] = risultati.get(assistente, 0) + 1
+    return risultati
+
+
+def _punti_cronologia(dati: dict) -> list[dict]:
+    history = dati.get("cronologia_punti", {})
+    points = history.get("dati", []) if isinstance(history, dict) else []
+    return points if isinstance(points, list) else []
+
+
+def analizza_servizio_risposta(dati: dict, giocatori: list[str]) -> dict:
+    """Calcola punti giocati/vinti al servizio e in risposta per singolo giocatore.
+
+    Il ricevitore è quello indicato nel record del punto. Per esportazioni che
+    contengono i lati e il lato di battuta ma non il ricevitore, prova a ricavarlo.
+    Non attribuisce la risposta individuale nei JSON più vecchi privi di questi dati.
+    """
+    squadre = dati.get("squadre", {})
+    team_by_player: dict[str, str] = {}
+    team_members: dict[str, list[str]] = {}
+    if isinstance(squadre, dict):
+        for team, members in squadre.items():
+            if isinstance(members, list):
+                team_members[team] = members
+                for nome in members:
+                    team_by_player[nome] = team
+
+    lati = dati.get("lati_giocatori", {})
+    if not isinstance(lati, dict):
+        lati = {}
+
+    serve = {nome: {"giocati": 0, "vinti": 0} for nome in giocatori}
+    risposta = {nome: {"giocati": 0, "vinti": 0} for nome in giocatori}
+    punti_servizio_tracciati = 0
+    punti_risposta_tracciati = 0
+
+    for point in _punti_cronologia(dati):
         battitore = point.get("giocatore_al_servizio")
-        squadra_servizio = point.get("squadra_al_servizio") or giocatore_squadra.get(battitore)
-        squadra_punto = point.get("squadra_che_fa_punto")
-        if not battitore or not squadra_servizio or not squadra_punto:
-            continue
-        tracked += 1
-        serve.setdefault(battitore, {"giocati": 0, "vinti": 0})
-        serve[battitore]["giocati"] += 1
-        if squadra_punto == squadra_servizio:
-            serve[battitore]["vinti"] += 1
-        squadra_risposta = next((s for s in nomi_squadre if s != squadra_servizio), None)
-        if squadra_risposta:
-            return_by_team[squadra_risposta]["giocati"] += 1
-            if squadra_punto == squadra_risposta:
-                return_by_team[squadra_risposta]["vinti"] += 1
+        team_servizio = point.get("squadra_al_servizio") or team_by_player.get(battitore)
+        team_punto = point.get("squadra_che_fa_punto")
+
+        if battitore in serve and team_servizio and team_punto:
+            serve[battitore]["giocati"] += 1
+            punti_servizio_tracciati += 1
+            if team_punto == team_servizio:
+                serve[battitore]["vinti"] += 1
+
+        ricevitore = point.get("giocatore_in_risposta")
+        if not ricevitore:
+            lato_servizio = point.get("lato_servizio")
+            team_ricezione = point.get("squadra_in_risposta")
+            if not team_ricezione and team_servizio:
+                team_ricezione = next((team for team in team_members if team != team_servizio), None)
+            if lato_servizio in ("Destra", "Sinistra") and team_ricezione:
+                possibili = [
+                    nome for nome in team_members.get(team_ricezione, [])
+                    if lati.get(nome) == lato_servizio
+                ]
+                if len(possibili) == 1:
+                    ricevitore = possibili[0]
+
+        if ricevitore in risposta and team_punto:
+            team_ricezione = team_by_player.get(ricevitore) or point.get("squadra_in_risposta")
+            if team_ricezione:
+                risposta[ricevitore]["giocati"] += 1
+                punti_risposta_tracciati += 1
+                if team_punto == team_ricezione:
+                    risposta[ricevitore]["vinti"] += 1
+
     return {
-        "disponibile": tracked > 0,
-        "punti_tracciati": tracked,
-        "per_giocatore": serve,
-        "per_squadra_risposta": return_by_team,
-        "giocatore_squadra": giocatore_squadra,
-        "nomi_squadre": nomi_squadre,
+        "servizio_disponibile": punti_servizio_tracciati > 0,
+        "risposta_disponibile": punti_risposta_tracciati > 0,
+        "per_giocatore_servizio": serve,
+        "per_giocatore_risposta": risposta,
+        "team_by_player": team_by_player,
+        "team_members": team_members,
     }
 
 
 def rapporto(vinti: int, giocati: int) -> str:
-    return f"{vinti}/{giocati} ({100*vinti/giocati:.1f}%)" if giocati else "0/0 (N/D)"
+    return f"{vinti}/{giocati} ({100 * vinti / giocati:.1f}%)" if giocati else "N/D"
 
 
-def pct(n: int, d: int) -> float:
-    return 100 * n / d if d else 0.0
+def percentuale(parte: int, totale: int) -> float:
+    return 100.0 * parte / totale if totale else 0.0
 
 
 class PadelAnalysisApp:
     def __init__(self, root: tk.Tk, percorso: str, dati: dict):
-        self.root, self.percorso, self.dati = root, percorso, dati
+        self.root = root
+        self.percorso = percorso
+        self.dati = dati
         root.title("Analisi statistiche Padel")
-        root.geometry("1400x850")
-        root.minsize(1050, 680)
+        root.geometry("1510x850")
+        root.minsize(1080, 700)
+
         header = ttk.Frame(root, padding=(12, 10, 12, 5))
         header.pack(fill="x")
         ttk.Label(header, text="ANALISI STATISTICHE PADEL", font=("TkDefaultFont", 17, "bold")).pack(side="left")
@@ -170,7 +231,8 @@ class PadelAnalysisApp:
 
     def apri_json(self):
         percorso = filedialog.askopenfilename(
-            parent=self.root, title="Scegli il JSON esportato dal Padel Tracker",
+            parent=self.root,
+            title="Scegli il JSON esportato dal Padel Tracker",
             filetypes=[("File JSON", "*.json"), ("Tutti i file", "*.*")],
         )
         if not percorso:
@@ -187,11 +249,11 @@ class PadelAnalysisApp:
         for tab in self.notebook.tabs():
             self.notebook.forget(tab)
         self.giocatori, self.colpi, self.conteggi = normalizza_statistiche(self.dati)
-        self.servizio = analizza_servizio(self.dati, self.giocatori)
+        self.assist = normalizza_assist(self.dati, self.giocatori)
+        self.servizio_risposta = analizza_servizio_risposta(self.dati, self.giocatori)
         self.label_file.configure(text=f"File analizzato: {self.percorso}")
         self.crea_tab_riepilogo()
         self.crea_tab_dettaglio()
-        self.crea_tab_grafici()
 
     @staticmethod
     def crea_tree(parent, columns, headings, widths):
@@ -200,7 +262,7 @@ class PadelAnalysisApp:
         tree = ttk.Treeview(wrap, columns=columns, show="headings")
         for col, heading, width in zip(columns, headings, widths):
             tree.heading(col, text=heading)
-            tree.column(col, width=width, minwidth=65, anchor="center")
+            tree.column(col, width=width, minwidth=65, anchor="center", stretch=True)
         sy = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         sx = ttk.Scrollbar(wrap, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
@@ -226,185 +288,95 @@ class PadelAnalysisApp:
         ttk.Label(
             frame,
             text=(
-                "Quota colpi = colpi registrati dal giocatore / colpi totali registrati. "
-                "Errori totali = errori forzati + non forzati. Punti in risposta è una metrica di squadra, "
-                "ripetuta sui due compagni perché il battitore è l'unico giocatore di servizio registrato."
+                "% colpi coppia = colpi registrati dal giocatore / totale colpi dei due compagni. "
+                "Servizio e risposta sono mostrati come punti vinti / punti giocati. "
+                "La risposta individuale richiede il lato del servizio e il lato assegnato ai giocatori."
             ),
-            wraplength=1300, justify="left",
-        ).pack(fill="x", padx=12, pady=(10, 0))
-        columns = ("giocatore", "winner", "err_nf", "err_f", "err_tot", "smash", "colpi", "quota", "servizio", "risposta")
+            wraplength=1400,
+            justify="left",
+            padding=(12, 10, 12, 5),
+        ).pack(fill="x")
+
+        columns = ("giocatore", "winner", "assist", "err_nf", "err_tot", "numero_colpi", "pct_coppia", "servizio", "risposta")
         headings = (
-            "Giocatore", "Winner", "Errori non forzati", "Errori forzati", "Errori totali",
-            "Smash winner/totale", "Numero colpi", "Quota colpi (%)",
-            "Punti vinti in servizio", "Punti in risposta (squadra)",
+            "Giocatore", "Winner", "Assist", "Errori non forzati", "Errori totali",
+            "Numero colpi", "% colpi coppia", "Punti vinti al servizio", "Punti vinti in risposta",
         )
-        widths = (190, 80, 140, 115, 105, 145, 105, 105, 180, 210)
+        widths = (190, 85, 80, 145, 115, 105, 120, 200, 200)
         tree = self.crea_tree(frame, columns, headings, widths)
-        shot_totals = {n: self.numero_colpi(n) for n in self.giocatori}
-        all_shots = sum(shot_totals.values())
+
+        shots = {nome: self.numero_colpi(nome) for nome in self.giocatori}
+        squadra_di = self.servizio_risposta["team_by_player"]
+        membri_squadra = self.servizio_risposta["team_members"]
         for nome in self.giocatori:
             winner = self.totale(nome, "Winner")
             err_nf = self.totale(nome, "Errore non forzato")
             err_f = self.totale(nome, "Errore forzato")
-            smash_total = self.totale_colpo(nome, "Smash")
-            smash_winners = self.conteggi.get(nome, {}).get("Winner", {}).get("Smash", 0)
-            if self.servizio["disponibile"]:
-                svc = self.servizio["per_giocatore"].get(nome, {"vinti": 0, "giocati": 0})
-                serve_text = rapporto(svc["vinti"], svc["giocati"])
-                team = self.servizio["giocatore_squadra"].get(nome)
-                ret = self.servizio["per_squadra_risposta"].get(team, {"vinti": 0, "giocati": 0})
-                return_text = rapporto(ret["vinti"], ret["giocati"])
-            else:
-                serve_text = "N/D — riesporta JSON"
-                return_text = "N/D — riesporta JSON"
+            team = squadra_di.get(nome)
+            totale_coppia = sum(shots.get(compagno, 0) for compagno in membri_squadra.get(team, []))
+            quota = f"{percentuale(shots[nome], totale_coppia):.1f}%" if totale_coppia else "N/D"
+
+            serve = self.servizio_risposta["per_giocatore_servizio"].get(nome, {"vinti": 0, "giocati": 0})
+            risposta = self.servizio_risposta["per_giocatore_risposta"].get(nome, {"vinti": 0, "giocati": 0})
+            serve_text = rapporto(serve["vinti"], serve["giocati"]) if self.servizio_risposta["servizio_disponibile"] else "N/D — dati assenti"
+            risposta_text = rapporto(risposta["vinti"], risposta["giocati"]) if self.servizio_risposta["risposta_disponibile"] else "N/D — dati assenti"
+
             tree.insert("", "end", values=(
-                nome, winner, err_nf, err_f, err_nf + err_f,
-                f"{smash_winners}/{smash_total}", shot_totals[nome],
-                f"{pct(shot_totals[nome], all_shots):.1f}%", serve_text, return_text,
+                nome,
+                winner,
+                self.assist.get(nome, 0),
+                err_nf,
+                err_f + err_nf,
+                shots[nome],
+                quota,
+                serve_text,
+                risposta_text,
             ))
-        if not self.servizio["disponibile"]:
+
+        avvisi = []
+        if not self.servizio_risposta["servizio_disponibile"]:
+            avvisi.append(
+                "Servizio non disponibile: il JSON non contiene punti con il battitore registrato. "
+                "Esporta la partita con il tracker aggiornato."
+            )
+        if not self.servizio_risposta["risposta_disponibile"]:
+            avvisi.append(
+                "Risposta individuale non disponibile: esporta di nuovo il JSON con la versione aggiornata, "
+                "impostando i lati Destra/Sinistra prima del primo colpo."
+            )
+        if avvisi:
             ttk.Label(
-                frame,
-                text=(
-                    "Il JSON non contiene il battitore per ogni punto: servizio e risposta non sono calcolabili. "
-                    "Usa il padel_stats.py aggiornato, imposta il giocatore al servizio all'inizio di ogni game "
-                    "ed esporta nuovamente il JSON."
-                ),
-                foreground="#8a4b08", wraplength=1300, justify="left",
-            ).pack(fill="x", padx=14, pady=(0, 10))
+                frame, text="\n".join(avvisi), foreground="#8a4b08",
+                wraplength=1400, justify="left", padding=(12, 5, 12, 10),
+            ).pack(fill="x")
 
     def crea_tab_dettaglio(self):
         frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="Winner ed errori per colpo")
+        self.notebook.add(frame, text="Dettaglio per colpo")
         ttk.Label(
             frame,
-            text="Ogni scheda riporta tutti i colpi disponibili per un giocatore, inclusi quelli con zero occorrenze.",
+            text="Le quattro tabelle seguenti riportano tutti i colpi per ciascun giocatore, anche quelli con zero occorrenze.",
             padding=(12, 10),
         ).pack(fill="x")
         nb = ttk.Notebook(frame)
         nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
         for nome in self.giocatori:
             page = ttk.Frame(nb)
             nb.add(page, text=nome)
             tree = self.crea_tree(
-                page, ("colpo", "winner", "err_f", "err_nf", "err_tot", "totale"),
+                page,
+                ("colpo", "winner", "err_f", "err_nf", "err_tot", "totale"),
                 ("Colpo", "Winner", "Errore forzato", "Errore non forzato", "Errori totali", "Totale colpi"),
-                (240, 100, 140, 160, 130, 120),
+                (240, 100, 145, 160, 130, 125),
             )
             for colpo in self.colpi:
                 win = self.conteggi.get(nome, {}).get("Winner", {}).get(colpo, 0)
                 ef = self.conteggi.get(nome, {}).get("Errore forzato", {}).get(colpo, 0)
                 enf = self.conteggi.get(nome, {}).get("Errore non forzato", {}).get(colpo, 0)
-                tree.insert("", "end", values=(colpo, win, ef, enf, ef + enf, self.totale_colpo(nome, colpo)))
-
-    def crea_tab_grafici(self):
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="Grafici")
-        nb = ttk.Notebook(frame)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
-
-        # 1. Winner ed errori per giocatore.
-        page = ttk.Frame(nb)
-        nb.add(page, text="Winner ed errori")
-        fig = Figure(figsize=(10.8, 6.0), dpi=100)
-        ax = fig.add_subplot(111)
-        x = list(range(len(self.giocatori)))
-        width = 0.24
-        winners = [self.totale(n, "Winner") for n in self.giocatori]
-        forced = [self.totale(n, "Errore forzato") for n in self.giocatori]
-        unforced = [self.totale(n, "Errore non forzato") for n in self.giocatori]
-        ax.bar([i - width for i in x], winners, width, label="Winner")
-        ax.bar(x, forced, width, label="Errore forzato")
-        ax.bar([i + width for i in x], unforced, width, label="Errore non forzato")
-        ax.set_title("Winner ed errori per giocatore")
-        ax.set_ylabel("Numero di colpi")
-        ax.set_xticks(x, self.giocatori, rotation=12, ha="right")
-        ax.legend()
-        ax.grid(axis="y", alpha=0.25)
-        fig.tight_layout()
-        self.aggiungi_figura(page, fig)
-
-        # 2. Smash winner rispetto a tutti gli smash registrati.
-        page = ttk.Frame(nb)
-        nb.add(page, text="Smash")
-        fig = Figure(figsize=(10.8, 6.0), dpi=100)
-        ax = fig.add_subplot(111)
-        smash_win = [self.conteggi.get(n, {}).get("Winner", {}).get("Smash", 0) for n in self.giocatori]
-        smash_altro = [max(0, self.totale_colpo(n, "Smash") - self.conteggi.get(n, {}).get("Winner", {}).get("Smash", 0)) for n in self.giocatori]
-        x = list(range(len(self.giocatori)))
-        ax.bar(x, smash_win, label="Smash winner")
-        ax.bar(x, smash_altro, bottom=smash_win, label="Altri smash registrati")
-        ax.set_title("Smash winner e totale smash registrati")
-        ax.set_ylabel("Numero di smash")
-        ax.set_xticks(x, self.giocatori, rotation=12, ha="right")
-        ax.legend()
-        ax.grid(axis="y", alpha=0.25)
-        fig.tight_layout()
-        self.aggiungi_figura(page, fig)
-
-        # 3. Winner ed errori aggregati per tipologia di colpo.
-        page = ttk.Frame(nb)
-        nb.add(page, text="Per tipologia di colpo")
-        fig = Figure(figsize=(11.2, 6.2), dpi=100)
-        ax = fig.add_subplot(111)
-        agg_win = [sum(self.conteggi.get(n, {}).get("Winner", {}).get(c, 0) for n in self.giocatori) for c in self.colpi]
-        agg_err = [sum(
-            self.conteggi.get(n, {}).get("Errore forzato", {}).get(c, 0)
-            + self.conteggi.get(n, {}).get("Errore non forzato", {}).get(c, 0)
-            for n in self.giocatori
-        ) for c in self.colpi]
-        x = list(range(len(self.colpi)))
-        width = 0.38
-        ax.bar([i - width / 2 for i in x], agg_win, width, label="Winner")
-        ax.bar([i + width / 2 for i in x], agg_err, width, label="Errori totali")
-        ax.set_title("Winner ed errori per tipologia di colpo — tutti i giocatori")
-        ax.set_ylabel("Numero di colpi")
-        ax.set_xticks(x, self.colpi, rotation=35, ha="right")
-        ax.legend()
-        ax.grid(axis="y", alpha=0.25)
-        fig.tight_layout()
-        self.aggiungi_figura(page, fig)
-
-        # 4. Percentuali di servizio e risposta, solo quando sono nel JSON.
-        page = ttk.Frame(nb)
-        nb.add(page, text="Servizio e risposta")
-        if not self.servizio["disponibile"]:
-            ttk.Label(
-                page,
-                text=(
-                    "Il JSON non include il battitore di ogni punto.\n\n"
-                    "Apri il tracker aggiornato, seleziona il giocatore che serve all'inizio di ogni game "
-                    "ed esporta nuovamente le statistiche."
-                ), justify="center", anchor="center", font=("TkDefaultFont", 12),
-            ).pack(fill="both", expand=True, padx=20, pady=20)
-        else:
-            fig = Figure(figsize=(10.8, 6.0), dpi=100)
-            ax = fig.add_subplot(111)
-            serve_pct, return_pct = [], []
-            for nome in self.giocatori:
-                s = self.servizio["per_giocatore"].get(nome, {"vinti": 0, "giocati": 0})
-                serve_pct.append(pct(s["vinti"], s["giocati"]))
-                squadra = self.servizio["giocatore_squadra"].get(nome)
-                r = self.servizio["per_squadra_risposta"].get(squadra, {"vinti": 0, "giocati": 0})
-                return_pct.append(pct(r["vinti"], r["giocati"]))
-            x = list(range(len(self.giocatori)))
-            width = 0.36
-            ax.bar([i - width / 2 for i in x], serve_pct, width, label="Punti vinti quando serve il giocatore")
-            ax.bar([i + width / 2 for i in x], return_pct, width, label="Punti vinti in risposta (squadra)")
-            ax.set_ylim(0, 100)
-            ax.set_ylabel("Punti vinti (%)")
-            ax.set_title("Percentuale di punti vinti in servizio e in risposta")
-            ax.set_xticks(x, self.giocatori, rotation=12, ha="right")
-            ax.legend()
-            ax.grid(axis="y", alpha=0.25)
-            fig.tight_layout()
-            self.aggiungi_figura(page, fig)
-
-    @staticmethod
-    def aggiungi_figura(parent, fig):
-        canvas = FigureCanvasTkAgg(fig, master=parent)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
+                tree.insert("", "end", values=(
+                    colpo, win, ef, enf, ef + enf, self.totale_colpo(nome, colpo)
+                ))
 
 
 def main():
@@ -413,12 +385,14 @@ def main():
         dialog = tk.Tk()
         dialog.withdraw()
         percorso = filedialog.askopenfilename(
-            parent=dialog, title="Scegli il JSON esportato dal Padel Tracker",
+            parent=dialog,
+            title="Scegli il JSON esportato dal Padel Tracker",
             filetypes=[("File JSON", "*.json"), ("Tutti i file", "*.*")],
         )
         dialog.destroy()
         if not percorso:
             return
+
     try:
         dati = carica_json(percorso)
     except (OSError, json.JSONDecodeError, ValueError) as err:
@@ -431,6 +405,7 @@ def main():
         except tk.TclError:
             pass
         return
+
     root = tk.Tk()
     PadelAnalysisApp(root, percorso, dati)
     root.mainloop()
