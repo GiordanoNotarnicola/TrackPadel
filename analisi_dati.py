@@ -201,6 +201,270 @@ def analizza_servizio_risposta(dati: dict, giocatori: list[str]) -> dict:
         "team_members": team_members,
     }
 
+def _indice_squadra(nome_squadra: str | None, nomi_squadre: list[str]) -> int | None:
+    """Converte il nome della squadra nell'indice usato dal punteggio (0/1)."""
+    if nome_squadra is None:
+        return None
+    try:
+        return nomi_squadre.index(nome_squadra)
+    except ValueError:
+        return None
+
+
+def _squadra_ha_game_point(stato: dict, indice_squadra: int) -> bool:
+    """Dice se la squadra avrebbe un game point vincendo il punto successivo.
+
+    Esclude i tie-break. Comprende i punteggi 0/15/30-40, AD1/AD2 e lo Star Point.
+    """
+    if not isinstance(stato, dict):
+        return False
+    if stato.get("tie_break"):
+        return False
+
+    testo = str(stato.get("punti_game", "")).strip().upper()
+    if testo.startswith("TB "):
+        return False
+    if stato.get("star_point") or testo == "STAR POINT":
+        return True
+
+    parti = testo.split("-", 1)
+    if len(parti) != 2:
+        return False
+    token = [parte.strip() for parte in parti]
+    if indice_squadra not in (0, 1):
+        return False
+
+    mio = token[indice_squadra]
+    avversario = token[1 - indice_squadra]
+    if mio.startswith("AD"):
+        return True
+    return mio == "40" and avversario in {"0", "15", "30"}
+
+
+def _game_terminato(record: dict) -> bool:
+    """Rileva la chiusura del game confrontando lo stato prima/dopo il punto."""
+    prima = record.get("punteggio_prima") or {}
+    dopo = record.get("punteggio_dopo") or {}
+    if prima.get("game") is not None and dopo.get("game") is not None:
+        if str(prima.get("game")) != str(dopo.get("game")):
+            return True
+    if prima.get("set") is not None and dopo.get("set") is not None:
+        if str(prima.get("set")) != str(dopo.get("set")):
+            return True
+    return bool(record.get("set_completato_in_questa_azione"))
+
+
+def _ricevitore_record(record: dict, squadra_servizio: str, team_members: dict,
+                       lati: dict, team_by_player: dict) -> str | None:
+    """Usa il ricevitore salvato nel punto; prova a ricavarlo nei JSON compatibili."""
+    ricevitore = record.get("giocatore_in_risposta")
+    if ricevitore and ricevitore in team_by_player:
+        return ricevitore
+    squadra_risposta = record.get("squadra_in_risposta")
+    if not squadra_risposta:
+        squadra_risposta = next((team for team in team_members if team != squadra_servizio), None)
+    lato = record.get("lato_servizio")
+    if lato in ("Destra", "Sinistra") and squadra_risposta:
+        candidati = [nome for nome in team_members.get(squadra_risposta, []) if lati.get(nome) == lato]
+        if len(candidati) == 1:
+            return candidati[0]
+    return None
+
+
+def analizza_break_point(dati: dict, giocatori: list[str]) -> dict:
+    """Analizza break point, conversioni, salvataggi e modalità dei break subiti.
+
+    Usa esclusivamente la cronologia del JSON esportato. I risultati di squadra
+    possono essere calcolati se è registrata la squadra al servizio; i risultati
+    individuali richiedono anche battitore e/o ricevitore identificabili.
+    """
+    raw_squadre = dati.get("squadre", {})
+    if isinstance(raw_squadre, dict):
+        nomi_squadre = [nome for nome, membri in raw_squadre.items() if isinstance(membri, list)]
+    else:
+        nomi_squadre = []
+    team_members = {nome: raw_squadre.get(nome, []) for nome in nomi_squadre}
+    team_by_player = {
+        giocatore: squadra
+        for squadra, membri in team_members.items()
+        for giocatore in membri
+    }
+    lati = dati.get("lati_giocatori", {})
+    if not isinstance(lati, dict):
+        lati = {}
+
+    player_stats = {
+        nome: {
+            "bp_avuti": 0, "bp_convertiti": 0, "bp_persi": 0,
+            "bp_affrontati": 0, "bp_salvati": 0,
+            "break_fatti": 0, "break_subiti": 0,
+            "winner_break": 0,
+            "errori_forzati_break": 0, "errori_non_forzati_break": 0,
+        }
+        for nome in giocatori
+    }
+    team_stats = {
+        nome: {
+            "bp_avuti": 0, "bp_convertiti": 0, "bp_persi": 0,
+            "bp_affrontati": 0, "bp_salvati": 0,
+            "break_fatti": 0, "break_subiti": 0,
+        }
+        for nome in nomi_squadre
+    }
+
+    break_points = []
+    break_subiti = []
+    bp_senza_ricevitore = 0
+    bp_senza_battitore = 0
+    bp_vinti_senza_game_chiuso = 0
+
+    for record in _punti_cronologia(dati):
+        prima = record.get("punteggio_prima") or {}
+        if not prima:
+            continue
+
+        battitore = record.get("giocatore_al_servizio")
+        squadra_servizio = record.get("squadra_al_servizio") or team_by_player.get(battitore)
+        idx_servizio = _indice_squadra(squadra_servizio, nomi_squadre)
+        if idx_servizio is None or len(nomi_squadre) != 2:
+            continue
+        idx_risposta = 1 - idx_servizio
+        squadra_risposta = nomi_squadre[idx_risposta]
+        if not _squadra_ha_game_point(prima, idx_risposta):
+            continue
+
+        # Un break point è una chance della squadra in risposta di chiudere il game.
+        ricevitore = _ricevitore_record(record, squadra_servizio, team_members, lati, team_by_player)
+        squadra_punto = record.get("squadra_che_fa_punto")
+        giocatore_finale = record.get("giocatore")
+        esito = record.get("esito", "N/D")
+        colpo = record.get("colpo", "N/D")
+        if not squadra_punto and giocatore_finale in team_by_player:
+            squadra_finale = team_by_player[giocatore_finale]
+            if esito == "Winner":
+                squadra_punto = squadra_finale
+            elif esito in ("Errore forzato", "Errore non forzato"):
+                squadra_punto = next((team for team in nomi_squadre if team != squadra_finale), None)
+
+        indice_punto = _indice_squadra(squadra_punto, nomi_squadre)
+        chiuso_game = _game_terminato(record)
+        punto_risposta_vinto = indice_punto == idx_risposta
+        punto_servizio_vinto = indice_punto == idx_servizio
+        convertito = punto_risposta_vinto and chiuso_game
+        salvato = punto_servizio_vinto
+        if punto_risposta_vinto and not chiuso_game:
+            bp_vinti_senza_game_chiuso += 1
+
+        if squadra_risposta in team_stats:
+            team_stats[squadra_risposta]["bp_avuti"] += 1
+        if squadra_servizio in team_stats:
+            team_stats[squadra_servizio]["bp_affrontati"] += 1
+        if ricevitore in player_stats:
+            player_stats[ricevitore]["bp_avuti"] += 1
+        else:
+            bp_senza_ricevitore += 1
+        if battitore in player_stats:
+            player_stats[battitore]["bp_affrontati"] += 1
+        else:
+            bp_senza_battitore += 1
+
+        if convertito:
+            team_stats[squadra_risposta]["bp_convertiti"] += 1
+            team_stats[squadra_risposta]["break_fatti"] += 1
+            team_stats[squadra_servizio]["break_subiti"] += 1
+            if ricevitore in player_stats:
+                player_stats[ricevitore]["bp_convertiti"] += 1
+                player_stats[ricevitore]["break_fatti"] += 1
+            if battitore in player_stats:
+                player_stats[battitore]["break_subiti"] += 1
+        elif salvato:
+            team_stats[squadra_risposta]["bp_persi"] += 1
+            team_stats[squadra_servizio]["bp_salvati"] += 1
+            if ricevitore in player_stats:
+                player_stats[ricevitore]["bp_persi"] += 1
+            if battitore in player_stats:
+                player_stats[battitore]["bp_salvati"] += 1
+
+        if convertito:
+            if esito == "Winner" and team_by_player.get(giocatore_finale) == squadra_risposta:
+                if giocatore_finale in player_stats:
+                    player_stats[giocatore_finale]["winner_break"] += 1
+                causa = f"Winner della squadra in risposta ({colpo})"
+                tipo_chiusura = "Winner"
+                autore_errore = "—"
+            elif esito in ("Errore forzato", "Errore non forzato") and team_by_player.get(giocatore_finale) == squadra_servizio:
+                causa = f"{esito} di {giocatore_finale} ({colpo})"
+                tipo_chiusura = esito
+                autore_errore = giocatore_finale
+                chiave = "errori_forzati_break" if esito == "Errore forzato" else "errori_non_forzati_break"
+                if giocatore_finale in player_stats:
+                    player_stats[giocatore_finale][chiave] += 1
+            else:
+                causa = f"{esito} — {giocatore_finale or 'giocatore non identificato'} ({colpo})"
+                tipo_chiusura = esito
+                autore_errore = "—"
+
+            detail = {
+                "punto_numero": record.get("punto_numero", "?"),
+                "set": prima.get("set", "N/D"),
+                "game_prima": prima.get("game", "N/D"),
+                "punteggio_prima": prima.get("punti_game", "N/D"),
+                "giocatore_al_servizio": battitore or "N/D",
+                "squadra_al_servizio": squadra_servizio,
+                "giocatore_in_risposta": ricevitore or "N/D",
+                "squadra_in_risposta": squadra_risposta,
+                "giocatore_finale": giocatore_finale or "N/D",
+                "colpo_finale": colpo,
+                "esito_finale": esito,
+                "tipo_chiusura": tipo_chiusura,
+                "causa_break": causa,
+                "autore_errore": autore_errore,
+                "break_subito_da": battitore or squadra_servizio,
+                "break_fatto_da": ricevitore or squadra_risposta,
+            }
+            break_subiti.append(detail)
+
+        if convertito:
+            stato_bp = "CONVERTITO — break fatto"
+        elif salvato:
+            stato_bp = "SALVATO dal servizio"
+        elif punto_risposta_vinto:
+            stato_bp = "Punto BP vinto, ma game non risulta chiuso"
+        else:
+            stato_bp = "Esito non attribuibile dal JSON"
+
+        break_points.append({
+            "punto_numero": record.get("punto_numero", "?"),
+            "set": prima.get("set", "N/D"),
+            "game_prima": prima.get("game", "N/D"),
+            "punteggio_prima": prima.get("punti_game", "N/D"),
+            "giocatore_al_servizio": battitore or "N/D",
+            "squadra_al_servizio": squadra_servizio,
+            "giocatore_in_risposta": ricevitore or "N/D",
+            "squadra_in_risposta": squadra_risposta,
+            "giocatore_finale": giocatore_finale or "N/D",
+            "colpo_finale": colpo,
+            "esito_finale": esito,
+            "squadra_che_fa_punto": squadra_punto or "N/D",
+            "stato_bp": stato_bp,
+            "convertito": convertito,
+            "salvato": salvato,
+        })
+
+    return {
+        "per_giocatore": player_stats,
+        "per_squadra": team_stats,
+        "break_points": break_points,
+        "break_subiti": break_subiti,
+        "numero_break_point": len(break_points),
+        "numero_break_subiti": len(break_subiti),
+        "bp_senza_ricevitore": bp_senza_ricevitore,
+        "bp_senza_battitore": bp_senza_battitore,
+        "bp_vinti_senza_game_chiuso": bp_vinti_senza_game_chiuso,
+        "squadre": nomi_squadre,
+    }
+
+
 
 def rapporto(vinti: int, giocati: int) -> str:
     return f"{vinti}/{giocati} ({100 * vinti / giocati:.1f}%)" if giocati else "N/D"
@@ -251,9 +515,11 @@ class PadelAnalysisApp:
         self.giocatori, self.colpi, self.conteggi = normalizza_statistiche(self.dati)
         self.assist = normalizza_assist(self.dati, self.giocatori)
         self.servizio_risposta = analizza_servizio_risposta(self.dati, self.giocatori)
+        self.break_analysis = analizza_break_point(self.dati, self.giocatori)
         self.label_file.configure(text=f"File analizzato: {self.percorso}")
         self.crea_tab_riepilogo()
         self.crea_tab_dettaglio()
+        self.crea_tab_break_point()
 
     @staticmethod
     def crea_tree(parent, columns, headings, widths):
@@ -343,6 +609,193 @@ class PadelAnalysisApp:
             avvisi.append(
                 "Risposta individuale non disponibile: esporta di nuovo il JSON con la versione aggiornata, "
                 "impostando i lati Destra/Sinistra prima del primo colpo."
+            )
+        if avvisi:
+            ttk.Label(
+                frame, text="\n".join(avvisi), foreground="#8a4b08",
+                wraplength=1400, justify="left", padding=(12, 5, 12, 10),
+            ).pack(fill="x")
+
+
+    def crea_tab_break_point(self):
+        """Mostra riepilogo di squadra/giocatore e dettaglio dei break point."""
+        analisi = self.break_analysis
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text="Break point")
+
+        summary = (
+            f"Break point individuati: {analisi['numero_break_point']}  |  "
+            f"Break fatti: {analisi['numero_break_subiti']}"
+        )
+        ttk.Label(frame, text=summary, font=("TkDefaultFont", 11, "bold"),
+                  padding=(12, 10, 12, 4)).pack(fill="x")
+        ttk.Label(
+            frame,
+            text=(
+                "Un break point viene contato quando la squadra in risposta può vincere il game con il punto successivo. "
+                "'Convertito' significa che la risposta vince il punto e il game; 'salvato' significa che la squadra al "
+                "servizio vince il punto. I tie-break sono esclusi. I break subiti sono classificati in base all'azione "
+                "che ha chiuso il game: winner avversario, errore forzato o errore non forzato."
+            ),
+            wraplength=1400, justify="left", padding=(12, 0, 12, 8),
+        ).pack(fill="x")
+
+        nb = ttk.Notebook(frame)
+        nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        # Tabella giocatori: attribuzione individuale basata sul battitore e sul ricevitore registrati.
+        page_player = ttk.Frame(nb)
+        nb.add(page_player, text="Riepilogo giocatori")
+        ttk.Label(
+            page_player,
+            text=(
+                "Le statistiche individuali dipendono dal battitore/ricevitore identificato nel JSON. "
+                "Le statistiche di squadra, invece, restano valide quando è nota la squadra al servizio."
+            ),
+            wraplength=1350, justify="left", padding=(10, 8),
+        ).pack(fill="x")
+        cols = (
+            "giocatore", "bp_avuti", "convertiti", "persi", "pct_conv",
+            "bp_affrontati", "salvati", "pct_salv", "break_fatti", "break_subiti",
+            "winner_break", "ef_break", "enf_break",
+        )
+        heads = (
+            "Giocatore", "BP avuti in risposta", "Convertiti", "Persi", "% conversione",
+            "BP affrontati al servizio", "Salvati", "% salvataggio", "Break fatti", "Break subiti",
+            "Winner su BP", "Errori forzati che causano break", "Errori non forzati che causano break",
+        )
+        widths = (175, 125, 85, 75, 105, 150, 75, 105, 90, 100, 95, 175, 195)
+        tree_player = self.crea_tree(page_player, cols, heads, widths)
+        for nome in self.giocatori:
+            st = analisi["per_giocatore"].get(nome, {})
+            conv = st.get("bp_convertiti", 0)
+            avuti = st.get("bp_avuti", 0)
+            salvati = st.get("bp_salvati", 0)
+            affrontati = st.get("bp_affrontati", 0)
+            tree_player.insert("", "end", values=(
+                nome,
+                avuti,
+                conv,
+                st.get("bp_persi", 0),
+                f"{100 * conv / avuti:.1f}%" if avuti else "N/D",
+                affrontati,
+                salvati,
+                f"{100 * salvati / affrontati:.1f}%" if affrontati else "N/D",
+                st.get("break_fatti", 0),
+                st.get("break_subiti", 0),
+                st.get("winner_break", 0),
+                st.get("errori_forzati_break", 0),
+                st.get("errori_non_forzati_break", 0),
+            ))
+
+        # Tabella aggregata per squadra, utile anche quando non si può individuare il ricevitore individuale.
+        page_team = ttk.Frame(nb)
+        nb.add(page_team, text="Riepilogo squadre")
+        ttk.Label(
+            page_team,
+            text="Statistiche di squadra conteggiate dalla cronologia dei punti con il servizio identificabile.",
+            padding=(10, 8),
+        ).pack(fill="x")
+        team_cols = (
+            "squadra", "bp_avuti", "convertiti", "persi", "pct_conv",
+            "bp_affrontati", "salvati", "pct_salv", "break_fatti", "break_subiti",
+        )
+        team_heads = (
+            "Squadra", "BP avuti in risposta", "Convertiti", "Persi", "% conversione",
+            "BP affrontati al servizio", "Salvati", "% salvataggio", "Break fatti", "Break subiti",
+        )
+        team_tree = self.crea_tree(page_team, team_cols, team_heads,
+                                   (160, 130, 95, 80, 110, 160, 80, 115, 100, 105))
+        for team in analisi["squadre"]:
+            st = analisi["per_squadra"].get(team, {})
+            avuti = st.get("bp_avuti", 0)
+            conv = st.get("bp_convertiti", 0)
+            affrontati = st.get("bp_affrontati", 0)
+            salvati = st.get("bp_salvati", 0)
+            team_tree.insert("", "end", values=(
+                team, avuti, conv, st.get("bp_persi", 0),
+                f"{100 * conv / avuti:.1f}%" if avuti else "N/D",
+                affrontati, salvati,
+                f"{100 * salvati / affrontati:.1f}%" if affrontati else "N/D",
+                st.get("break_fatti", 0), st.get("break_subiti", 0),
+            ))
+
+        # Cronologia di tutte le occasioni break: salvate e convertite.
+        page_all = ttk.Frame(nb)
+        nb.add(page_all, text="Tutti i break point")
+        ttk.Label(
+            page_all,
+            text="Una riga per ogni break point affrontato: vedi punteggio prima del punto, esito, colpo finale e se è stato convertito o salvato.",
+            wraplength=1350, justify="left", padding=(10, 8),
+        ).pack(fill="x")
+        all_cols = (
+            "punto", "set", "game", "punteggio", "battitore", "squadra_servizio",
+            "ricevitore", "giocatore_finale", "colpo", "esito", "punto_a", "stato",
+        )
+        all_heads = (
+            "Punto #", "Set", "Game prima", "Punteggio", "Battitore", "Squadra al servizio",
+            "Ricevitore", "Ultimo giocatore", "Colpo finale", "Esito finale", "Punto a", "Risultato BP",
+        )
+        all_widths = (70, 70, 100, 100, 150, 135, 145, 155, 130, 135, 120, 230)
+        tree_all = self.crea_tree(page_all, all_cols, all_heads, all_widths)
+        for r in analisi["break_points"]:
+            tree_all.insert("", "end", values=(
+                r["punto_numero"], r["set"], r["game_prima"], r["punteggio_prima"],
+                r["giocatore_al_servizio"], r["squadra_al_servizio"], r["giocatore_in_risposta"],
+                r["giocatore_finale"], r["colpo_finale"], r["esito_finale"],
+                r["squadra_che_fa_punto"], r["stato_bp"],
+            ))
+
+        # Solo i break effettivamente convertiti, classificati per tipo di chiusura.
+        page_broken = ttk.Frame(nb)
+        nb.add(page_broken, text="Break subiti e causa")
+        ttk.Label(
+            page_broken,
+            text=(
+                "Questa tabella contiene soltanto i punti in cui il break point è stato convertito e il game risulta chiuso. "
+                "La causa indica il winner o l'errore decisivo; il dettaglio dell'autore dell'errore è separato dal battitore."
+            ),
+            wraplength=1350, justify="left", padding=(10, 8),
+        ).pack(fill="x")
+        broken_cols = (
+            "punto", "set", "game", "punteggio", "battitore", "squadra_servizio",
+            "ricevitore", "autore", "colpo", "esito", "causa", "break_subito", "break_fatto",
+        )
+        broken_heads = (
+            "Punto #", "Set", "Game prima", "Punteggio BP", "Battitore", "Squadra che serve",
+            "Ricevitore", "Autore azione finale", "Colpo finale", "Esito", "Causa del break",
+            "Break subito da", "Break fatto da",
+        )
+        broken_widths = (70, 70, 100, 105, 145, 130, 145, 155, 125, 130, 250, 145, 145)
+        tree_broken = self.crea_tree(page_broken, broken_cols, broken_heads, broken_widths)
+        for r in analisi["break_subiti"]:
+            tree_broken.insert("", "end", values=(
+                r["punto_numero"], r["set"], r["game_prima"], r["punteggio_prima"],
+                r["giocatore_al_servizio"], r["squadra_al_servizio"], r["giocatore_in_risposta"],
+                r["giocatore_finale"], r["colpo_finale"], r["esito_finale"], r["causa_break"],
+                r["break_subito_da"], r["break_fatto_da"],
+            ))
+
+        avvisi = []
+        if analisi["numero_break_point"] == 0:
+            avvisi.append(
+                "Nessun break point riconosciuto. Verifica che il JSON contenga la cronologia con punteggio_prima, "
+                "squadra_al_servizio e punteggio_dopo. I vecchi export senza questi campi non permettono questa analisi."
+            )
+        if analisi["bp_senza_ricevitore"]:
+            avvisi.append(
+                f"{analisi['bp_senza_ricevitore']} break point non attribuibili individualmente al ricevitore: "
+                "il riepilogo di squadra li include comunque."
+            )
+        if analisi["bp_senza_battitore"]:
+            avvisi.append(
+                f"{analisi['bp_senza_battitore']} break point senza battitore identificabile: "
+                "non sono attribuiti al riepilogo individuale del servizio."
+            )
+        if analisi["bp_vinti_senza_game_chiuso"]:
+            avvisi.append(
+                f"Attenzione: in {analisi['bp_vinti_senza_game_chiuso']} casi la squadra in risposta ha vinto un punto BP, "
+                "ma nel JSON non risulta la chiusura del game. Questi casi non sono conteggiati come break convertiti."
             )
         if avvisi:
             ttk.Label(
