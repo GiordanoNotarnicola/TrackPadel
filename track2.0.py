@@ -1,10 +1,9 @@
 """Padel Tracker: statistiche dei colpi, cronologia dei punti e punteggio live.
 
 Flusso di registrazione:
-1. Premi il pulsante del giocatore.
-2. Premi un pulsante del colpo.
-3. Continua selezionando giocatore e colpo per ogni azione dello scambio.
-4. Premi Winner, Errore forzato o Errore non forzato per chiudere il punto.
+1. Premi direttamente il pulsante del colpo nella colonna del giocatore che lo ha eseguito.
+2. Continua a registrare i colpi dello scambio: dopo ogni colpo è abilitata solo la squadra avversaria.
+3. Premi Winner, Errore forzato o Errore non forzato per chiudere il punto.
 
 Avvio: python padel_stats.py
 """
@@ -51,8 +50,8 @@ class PadelTracker:
     def __init__(self, root):
         self.root = root
         self.root.title("Padel — statistiche e punteggio")
-        self.root.geometry("1140x850")
-        self.root.minsize(1050, 800)
+        self.root.geometry("1320x970")
+        self.root.minsize(1120, 820)
 
         self.giocatori = SQUADRA_1 + SQUADRA_2
         if len(self.giocatori) != 4 or len(set(self.giocatori)) != 4:
@@ -94,9 +93,9 @@ class PadelTracker:
         # al file, non dall'interfaccia. Il lato di battuta alterna da solo.
         self.assist_stats = {nome: 0 for nome in self.giocatori}
 
-        # Le azioni intermedie sono confermate quando si seleziona un colpo
-        # successivo. L'ultimo colpo resta in attesa e diventa Winner/Errore
-        # quando si preme uno dei pulsanti di chiusura punto.
+        # Le azioni intermedie sono confermate quando un giocatore avversario
+        # registra il colpo successivo. L'ultimo colpo resta in attesa e diventa
+        # Winner/Errore quando si preme uno dei pulsanti di chiusura punto.
         self.scambio_corrente = []
         self.azione_in_attesa = None
         self.giocatore_selezionato = None
@@ -124,21 +123,21 @@ class PadelTracker:
             self.root,
             text="PADEL TRACKER",
             font=("TkDefaultFont", 18, "bold"),
-        ).pack(pady=(12, 5))
+        ).pack(pady=(8, 3))
 
-        score_frame = ttk.LabelFrame(self.root, text="Punteggio live", padding=10)
-        score_frame.pack(fill="x", padx=16, pady=5)
+        score_frame = ttk.LabelFrame(self.root, text="Punteggio live", padding=7)
+        score_frame.pack(fill="x", padx=12, pady=3)
         self.label_sets = ttk.Label(score_frame, font=("TkDefaultFont", 12, "bold"))
-        self.label_sets.pack(pady=2)
+        self.label_sets.pack(pady=1)
         self.label_games = ttk.Label(score_frame, font=("TkDefaultFont", 11))
-        self.label_games.pack(pady=2)
+        self.label_games.pack(pady=1)
         self.label_punti = ttk.Label(score_frame, font=("TkDefaultFont", 12, "bold"))
-        self.label_punti.pack(pady=2)
+        self.label_punti.pack(pady=1)
         self.label_stato = ttk.Label(score_frame, text="", font=("TkDefaultFont", 9, "italic"))
-        self.label_stato.pack(pady=(2, 0))
+        self.label_stato.pack(pady=(1, 0))
 
-        servizio_frame = ttk.LabelFrame(self.root, text="Servizio", padding=7)
-        servizio_frame.pack(fill="x", padx=16, pady=5)
+        servizio_frame = ttk.LabelFrame(self.root, text="Servizio", padding=5)
+        servizio_frame.pack(fill="x", padx=12, pady=3)
         ttk.Label(servizio_frame, text="Giocatore al servizio per il prossimo punto:").pack(side="left", padx=(2, 8))
         self.menu_server = ttk.Combobox(
             servizio_frame,
@@ -150,65 +149,73 @@ class PadelTracker:
         self.menu_server.pack(side="left", padx=3)
         ttk.Label(
             servizio_frame,
-            text="Aggiorna quando cambia il battitore; il lato di battuta alterna automaticamente.",
+            text="Il lato di battuta alterna automaticamente.",
         ).pack(side="left", padx=8)
 
-        squadre_frame = ttk.Frame(self.root)
-        squadre_frame.pack(fill="x", padx=16, pady=(5, 3))
-        self.bottoni_giocatori = {}
-        for colonna, (nome_squadra, nomi) in enumerate(
+        # Pannello per giocatore: ogni pulsante registra direttamente un colpo.
+        # Dopo ogni colpo, i pulsanti della squadra che ha appena colpito vengono disabilitati.
+        colpi_frame = ttk.LabelFrame(
+            self.root,
+            text="REGISTRA IL COLPO — premi direttamente un pulsante nella colonna del giocatore",
+            padding=5,
+        )
+        colpi_frame.pack(fill="both", expand=True, padx=12, pady=3)
+        colpi_frame.columnconfigure(0, weight=1, uniform="squadre")
+        colpi_frame.columnconfigure(1, weight=1, uniform="squadre")
+        self.bottoni_colpi = {}
+
+        for indice_squadra, (nome_squadra, nomi) in enumerate(
             ((NOMI_SQUADRE[0], SQUADRA_1), (NOMI_SQUADRE[1], SQUADRA_2))
         ):
-            gruppo = ttk.LabelFrame(
-                squadre_frame,
+            gruppo_squadra = ttk.LabelFrame(
+                colpi_frame,
                 text=f"{nome_squadra}: {' / '.join(nomi)}",
-                padding=8,
+                padding=4,
             )
-            gruppo.grid(row=0, column=colonna, sticky="nsew", padx=5)
-            squadre_frame.columnconfigure(colonna, weight=1)
-            for nome in nomi:
-                bottone = ttk.Button(
-                    gruppo,
-                    text=nome,
-                    command=lambda n=nome: self._seleziona_giocatore(n),
+            gruppo_squadra.grid(
+                row=0, column=indice_squadra, sticky="nsew", padx=4, pady=2
+            )
+            gruppo_squadra.columnconfigure(0, weight=1, uniform=f"giocatori_{indice_squadra}")
+            gruppo_squadra.columnconfigure(1, weight=1, uniform=f"giocatori_{indice_squadra}")
+
+            for indice_giocatore, nome in enumerate(nomi):
+                pannello_giocatore = ttk.LabelFrame(
+                    gruppo_squadra, text=nome, padding=4
                 )
-                bottone.pack(fill="x", pady=3, ipady=5)
-                self.bottoni_giocatori[nome] = bottone
+                pannello_giocatore.grid(
+                    row=0, column=indice_giocatore, sticky="nsew", padx=3, pady=2
+                )
+                for colpo in COLPI:
+                    bottone = ttk.Button(
+                        pannello_giocatore,
+                        text=colpo,
+                        command=lambda n=nome, c=colpo: self._registra_colpo(n, c),
+                    )
+                    bottone.pack(fill="x", pady=1, ipady=1)
+                    self.bottoni_colpi[(nome, colpo)] = bottone
 
         self.label_selezione = ttk.Label(
             self.root,
-            text="Passo 1: seleziona un giocatore.",
-            font=("TkDefaultFont", 11, "bold"),
+            text="Premi un colpo nella colonna del giocatore che lo esegue.",
+            font=("TkDefaultFont", 10, "bold"),
             anchor="center",
+            wraplength=1300,
         )
-        self.label_selezione.pack(fill="x", padx=16, pady=(5, 3))
-
-        colpi_frame = ttk.LabelFrame(self.root, text="Colpo eseguito — premi un solo pulsante", padding=8)
-        colpi_frame.pack(fill="x", padx=16, pady=4)
-        self.bottoni_colpi = {}
-        for indice, colpo in enumerate(COLPI):
-            riga, colonna = divmod(indice, 4)
-            bottone = ttk.Button(
-                colpi_frame,
-                text=colpo,
-                command=lambda c=colpo: self._registra_colpo_selezionato(c),
-                width=23,
-            )
-            bottone.grid(row=riga, column=colonna, sticky="ew", padx=4, pady=3, ipady=4)
-            colpi_frame.columnconfigure(colonna, weight=1)
-            self.bottoni_colpi[colpo] = bottone
+        self.label_selezione.pack(fill="x", padx=14, pady=(3, 2))
 
         self.label_scambio = ttk.Label(
             self.root,
             text="Scambio in corso: nessun colpo registrato.",
-            font=("TkDefaultFont", 10),
-            wraplength=1000,
+            font=("TkDefaultFont", 9),
+            wraplength=1300,
             justify="center",
         )
-        self.label_scambio.pack(fill="x", padx=18, pady=6)
+        self.label_scambio.pack(fill="x", padx=14, pady=2)
 
-        esito_frame = ttk.LabelFrame(self.root, text="Fine punto — premi l'esito del colpo in attesa", padding=8)
-        esito_frame.pack(fill="x", padx=16, pady=5)
+        esito_frame = ttk.LabelFrame(
+            self.root, text="Fine punto — chiudi il punto con l'esito corretto", padding=5
+        )
+        esito_frame.pack(fill="x", padx=12, pady=3)
         self.bottoni_esito = {}
         for esito, etichetta in (
             ("Winner", "WINNER"),
@@ -221,45 +228,37 @@ class PadelTracker:
                 command=lambda e=esito: self._gestisci_esito(e),
                 width=24,
             )
-            bottone.pack(side="left", expand=True, fill="x", padx=4, ipady=6)
+            bottone.pack(side="left", expand=True, fill="x", padx=4, ipady=4)
             self.bottoni_esito[esito] = bottone
 
         azioni = ttk.Frame(self.root)
-        azioni.pack(pady=(5, 10))
+        azioni.pack(pady=(2, 6))
         self.bottone_annulla = ttk.Button(
             azioni, text="Annulla ultima azione", command=self._annulla_ultima_azione
         )
-        self.bottone_annulla.grid(row=0, column=0, padx=5, pady=3)
+        self.bottone_annulla.grid(row=0, column=0, padx=4, pady=2)
         ttk.Button(
             azioni, text="Visualizza statistiche", command=self._mostra_statistiche
-        ).grid(row=0, column=1, padx=5, pady=3)
+        ).grid(row=0, column=1, padx=4, pady=2)
         ttk.Button(
             azioni, text="Esporta statistiche JSON", command=self._esporta_json
-        ).grid(row=0, column=2, padx=5, pady=3)
+        ).grid(row=0, column=2, padx=4, pady=2)
         ttk.Button(azioni, text="Esci", command=self.root.destroy).grid(
-            row=0, column=3, padx=5, pady=3
+            row=0, column=3, padx=4, pady=2
         )
 
-    def _seleziona_giocatore(self, giocatore):
-        """Seleziona chi esegue il prossimo colpo, senza registrare un'azione."""
-        if self.partita_finita:
+    def _registra_colpo(self, giocatore, colpo):
+        """Registra un colpo con un singolo clic, imponendo l'alternanza delle squadre."""
+        if self.partita_finita or colpo not in COLPI or giocatore not in self.giocatori:
             return
-        self.giocatore_selezionato = giocatore
-        self._aggiorna_punteggio()
 
-    def _registra_colpo_selezionato(self, colpo):
-        """Registra il colpo selezionato; il precedente diventa un colpo in gioco."""
-        if self.partita_finita:
-            return
-        if self.giocatore_selezionato not in self.giocatori:
-            messagebox.showwarning(
-                "Seleziona un giocatore",
-                "Prima premi il pulsante del giocatore che ha eseguito il colpo.",
-                parent=self.root,
-            )
-            return
-        if colpo not in COLPI:
-            return
+        # Una volta che una squadra ha colpito, può proseguire solo la squadra avversaria
+        # oppure si può chiudere il punto con i pulsanti Winner/Errore.
+        if self.azione_in_attesa is not None:
+            squadra_precedente = self.squadra_giocatore[self.azione_in_attesa["giocatore"]]
+            squadra_nuova = self.squadra_giocatore[giocatore]
+            if squadra_nuova == squadra_precedente:
+                return
 
         snapshot = self._snapshot()
         if self.azione_in_attesa is None:
@@ -275,7 +274,6 @@ class PadelTracker:
                 "punto_concluso": False,
             })
 
-        giocatore = self.giocatore_selezionato
         self.azione_in_attesa = {
             "numero_azione_nello_scambio": len(self.scambio_corrente) + 1,
             "giocatore": giocatore,
@@ -287,8 +285,6 @@ class PadelTracker:
             "snapshot": snapshot,
             "descrizione": f"{giocatore} — {colpo}",
         })
-        # Ogni colpo richiede una selezione esplicita del giocatore, così si
-        # riduce il rischio di attribuire per errore un colpo al compagno.
         self.giocatore_selezionato = None
         self._aggiorna_punteggio()
 
@@ -299,7 +295,7 @@ class PadelTracker:
         if not self.azione_in_attesa:
             messagebox.showwarning(
                 "Nessun colpo da chiudere",
-                "Seleziona un giocatore e premi il pulsante del colpo prima di assegnare l'esito.",
+                "Registra almeno un colpo premendo un pulsante nella colonna del giocatore prima di assegnare l'esito.",
                 parent=self.root,
             )
             return
@@ -671,12 +667,22 @@ class PadelTracker:
             stato = "Star Point: dopo due vantaggi si gioca un punto decisivo"
         self.label_stato.configure(text=stato)
 
-        if self.giocatore_selezionato:
+        if self.partita_finita:
+            self.label_selezione.configure(text="Partita terminata.")
+        elif self.azione_in_attesa:
+            giocatore_precedente = self.azione_in_attesa["giocatore"]
+            squadra_precedente = self.squadra_giocatore[giocatore_precedente]
+            squadra_successiva = NOMI_SQUADRE[1 - squadra_precedente]
             self.label_selezione.configure(
-                text=f"Giocatore selezionato: {self.giocatore_selezionato}. Ora premi il pulsante del colpo."
+                text=(
+                    f"Ultimo colpo: {giocatore_precedente} — {self.azione_in_attesa['colpo']}. "
+                    f"Ora seleziona un colpo per {squadra_successiva} oppure chiudi il punto."
+                )
             )
         else:
-            self.label_selezione.configure(text="Passo 1: seleziona un giocatore.")
+            self.label_selezione.configure(
+                text="Inizia lo scambio: premi direttamente il colpo nella colonna del giocatore."
+            )
 
         azioni_visibili = list(self.scambio_corrente)
         if self.azione_in_attesa:
@@ -699,13 +705,16 @@ class PadelTracker:
             self.label_scambio.configure(text="Scambio in corso: nessun colpo registrato.")
 
         partita_attiva = not self.partita_finita
-        for nome, bottone in self.bottoni_giocatori.items():
-            prefisso = "▶ " if nome == self.giocatore_selezionato else ""
-            bottone.configure(text=f"{prefisso}{nome}", state="normal" if partita_attiva else "disabled")
-        for bottone in self.bottoni_colpi.values():
-            bottone.configure(
-                state="normal" if partita_attiva and self.giocatore_selezionato else "disabled"
+        squadra_ammessa = None
+        if self.azione_in_attesa:
+            squadra_ultimo_colpo = self.squadra_giocatore[self.azione_in_attesa["giocatore"]]
+            squadra_ammessa = 1 - squadra_ultimo_colpo
+        for (nome, _colpo), bottone in self.bottoni_colpi.items():
+            squadra_giocatore = self.squadra_giocatore[nome]
+            abilitato = partita_attiva and (
+                squadra_ammessa is None or squadra_giocatore == squadra_ammessa
             )
+            bottone.configure(state="normal" if abilitato else "disabled")
         for bottone in self.bottoni_esito.values():
             bottone.configure(
                 state="normal" if partita_attiva and self.azione_in_attesa else "disabled"
