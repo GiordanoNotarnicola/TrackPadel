@@ -203,11 +203,13 @@ class PadelTracker:
         )
         self.label_selezione.pack(fill="x", padx=14, pady=(3, 2))
 
+        # Barra di stato a riga singola: mostra soltanto l'ultima azione,
+        # così il testo non cresce e non spinge i pulsanti di fine punto fuori finestra.
         self.label_scambio = ttk.Label(
             self.root,
-            text="Scambio in corso: nessun colpo registrato.",
+            text="Ultima azione: nessuna.",
             font=("TkDefaultFont", 9),
-            wraplength=1300,
+            anchor="center",
             justify="center",
         )
         self.label_scambio.pack(fill="x", padx=14, pady=2)
@@ -684,25 +686,25 @@ class PadelTracker:
                 text="Inizia lo scambio: premi direttamente il colpo nella colonna del giocatore."
             )
 
-        azioni_visibili = list(self.scambio_corrente)
+        # Visualizza soltanto l'azione più recente: la cronologia completa viene
+        # comunque conservata nel JSON, ma non viene mostrata nella finestra live.
         if self.azione_in_attesa:
-            azioni_visibili.append(self.azione_in_attesa)
-        if azioni_visibili:
-            descrizione = " → ".join(
-                f"{azione['giocatore']}: {azione['colpo']}"
-                for azione in azioni_visibili
+            azione = self.azione_in_attesa
+            numero_azione = len(self.scambio_corrente) + 1
+            testo_stato = (
+                f"Ultima azione: {azione['giocatore']} — {azione['colpo']} "
+                f"(colpo {numero_azione}; in attesa dell'esito)"
             )
-            attesa = ""
-            if self.azione_in_attesa:
-                attesa = (
-                    f"\nEsito finale da attribuire a: {self.azione_in_attesa['giocatore']} — "
-                    f"{self.azione_in_attesa['colpo']}"
-                )
-            self.label_scambio.configure(
-                text=f"Scambio in corso ({len(azioni_visibili)} colpi): {descrizione}{attesa}"
+        elif self.cronologia_punti:
+            ultimo_punto = self.cronologia_punti[-1]
+            testo_stato = (
+                f"Ultimo punto: {ultimo_punto['giocatore']} — "
+                f"{ultimo_punto['esito']} ({ultimo_punto['colpo']}); "
+                f"punto a {ultimo_punto['squadra_che_fa_punto']}"
             )
         else:
-            self.label_scambio.configure(text="Scambio in corso: nessun colpo registrato.")
+            testo_stato = "Ultima azione: nessuna."
+        self.label_scambio.configure(text=testo_stato)
 
         partita_attiva = not self.partita_finita
         squadra_ammessa = None
@@ -871,3 +873,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
