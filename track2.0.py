@@ -1,10 +1,10 @@
 """Padel Tracker: statistiche dei colpi, cronologia dei punti e punteggio live.
 
 Flusso di registrazione:
-1. Seleziona il giocatore.
-2. Seleziona il colpo.
-3. Se lo scambio continua, premi "Continua scambio" (nessun punto assegnato).
-4. Se il colpo chiude il punto, seleziona Winner/Errore e premi "Chiudi punto".
+1. Premi il pulsante del giocatore.
+2. Premi un pulsante del colpo.
+3. Continua selezionando giocatore e colpo per ogni azione dello scambio.
+4. Premi Winner, Errore forzato o Errore non forzato per chiudere il punto.
 
 Avvio: python padel_stats.py
 """
@@ -18,6 +18,14 @@ from tkinter import ttk, messagebox, filedialog
 SQUADRA_1 = ["Giulio Graziotti", "Iacovino"]
 SQUADRA_2 = ["Giocatore 3", "Giocatore 4"]
 NOMI_SQUADRE = ["Casa", "Fuori"]
+# Configurazione fissa dei lati per distinguere il ricevitore nelle statistiche.
+# Non è modificabile dalla finestra di tracking.
+LATI_GIOCATORI_DEFAULT = {
+    SQUADRA_1[0]: "Destra",
+    SQUADRA_1[1]: "Sinistra",
+    SQUADRA_2[0]: "Destra",
+    SQUADRA_2[1]: "Sinistra",
+}
 
 ESITI = ["Winner", "Errore forzato", "Errore non forzato"]
 ESITO_IN_GIOCO = "In gioco"
@@ -43,8 +51,8 @@ class PadelTracker:
     def __init__(self, root):
         self.root = root
         self.root.title("Padel — statistiche e punteggio")
-        self.root.geometry("980x750")
-        self.root.minsize(800, 660)
+        self.root.geometry("1140x850")
+        self.root.minsize(1050, 800)
 
         self.giocatori = SQUADRA_1 + SQUADRA_2
         if len(self.giocatori) != 4 or len(set(self.giocatori)) != 4:
@@ -56,7 +64,7 @@ class PadelTracker:
         }
 
         # stats[giocatore][esito][colpo] = conteggio.
-        # "In gioco" conta i colpi registrati con Continua scambio.
+        # "In gioco" conta i colpi non conclusivi dello scambio.
         self.stats = self._statistiche_vuote()
 
         # Stato del punteggio.
@@ -75,9 +83,23 @@ class PadelTracker:
         # a metà punto.
         self.server_var = tk.StringVar(value=SQUADRA_1[0])
         self.server_del_punto = None
+        # La battuta parte da Destra a inizio game e poi alterna Destra/Sinistra
+        # punto per punto. In un tie-break alterna a ogni punto senza reset.
+        self.lato_servizio_corrente = "Destra"
+        self.lato_servizio_del_punto = None
+        self.lati_giocatori = {
+            nome: LATI_GIOCATORI_DEFAULT.get(nome, "Destra") for nome in self.giocatori
+        }
+        # I lati dei quattro giocatori sono configurati nelle costanti in cima
+        # al file, non dall'interfaccia. Il lato di battuta alterna da solo.
+        self.assist_stats = {nome: 0 for nome in self.giocatori}
 
-        # Le azioni intermedie si accumulano qui finché non si chiude il punto.
+        # Le azioni intermedie sono confermate quando si seleziona un colpo
+        # successivo. L'ultimo colpo resta in attesa e diventa Winner/Errore
+        # quando si preme uno dei pulsanti di chiusura punto.
         self.scambio_corrente = []
+        self.azione_in_attesa = None
+        self.giocatore_selezionato = None
         self.punteggio_prima_scambio = None
 
         # Una voce in cronologia_punti per ogni punto concluso. Uno snapshot per
@@ -102,25 +124,22 @@ class PadelTracker:
             self.root,
             text="PADEL TRACKER",
             font=("TkDefaultFont", 18, "bold"),
-        ).pack(pady=(14, 8))
+        ).pack(pady=(12, 5))
 
-        score_frame = ttk.LabelFrame(self.root, text="Punteggio live", padding=12)
-        score_frame.pack(fill="x", padx=18, pady=8)
-
-        self.label_sets = ttk.Label(score_frame, font=("TkDefaultFont", 13, "bold"))
-        self.label_sets.pack(pady=3)
-        self.label_games = ttk.Label(score_frame, font=("TkDefaultFont", 12))
-        self.label_games.pack(pady=3)
+        score_frame = ttk.LabelFrame(self.root, text="Punteggio live", padding=10)
+        score_frame.pack(fill="x", padx=16, pady=5)
+        self.label_sets = ttk.Label(score_frame, font=("TkDefaultFont", 12, "bold"))
+        self.label_sets.pack(pady=2)
+        self.label_games = ttk.Label(score_frame, font=("TkDefaultFont", 11))
+        self.label_games.pack(pady=2)
         self.label_punti = ttk.Label(score_frame, font=("TkDefaultFont", 12, "bold"))
-        self.label_punti.pack(pady=3)
-        self.label_stato = ttk.Label(
-            score_frame, text="", font=("TkDefaultFont", 10, "italic")
-        )
-        self.label_stato.pack(pady=(3, 0))
+        self.label_punti.pack(pady=2)
+        self.label_stato = ttk.Label(score_frame, text="", font=("TkDefaultFont", 9, "italic"))
+        self.label_stato.pack(pady=(2, 0))
 
-        servizio_frame = ttk.LabelFrame(self.root, text="Servizio — dati per le statistiche", padding=8)
-        servizio_frame.pack(fill="x", padx=18, pady=(3, 7))
-        ttk.Label(servizio_frame, text="Giocatore al servizio nel game corrente:").pack(side="left", padx=(3, 8))
+        servizio_frame = ttk.LabelFrame(self.root, text="Servizio", padding=7)
+        servizio_frame.pack(fill="x", padx=16, pady=5)
+        ttk.Label(servizio_frame, text="Giocatore al servizio per il prossimo punto:").pack(side="left", padx=(2, 8))
         self.menu_server = ttk.Combobox(
             servizio_frame,
             textvariable=self.server_var,
@@ -128,190 +147,216 @@ class PadelTracker:
             state="readonly",
             width=24,
         )
-        self.menu_server.pack(side="left", padx=4)
+        self.menu_server.pack(side="left", padx=3)
         ttk.Label(
             servizio_frame,
-            text="Imposta il battitore effettivo all'inizio di ogni game; durante uno scambio la selezione è bloccata.",
-            wraplength=600,
-        ).pack(side="left", padx=10)
+            text="Aggiorna quando cambia il battitore; il lato di battuta alterna automaticamente.",
+        ).pack(side="left", padx=8)
 
         squadre_frame = ttk.Frame(self.root)
-        squadre_frame.pack(fill="x", padx=18, pady=(10, 6))
+        squadre_frame.pack(fill="x", padx=16, pady=(5, 3))
         self.bottoni_giocatori = {}
-
         for colonna, (nome_squadra, nomi) in enumerate(
             ((NOMI_SQUADRE[0], SQUADRA_1), (NOMI_SQUADRE[1], SQUADRA_2))
         ):
             gruppo = ttk.LabelFrame(
                 squadre_frame,
                 text=f"{nome_squadra}: {' / '.join(nomi)}",
-                padding=10,
+                padding=8,
             )
-            gruppo.grid(row=0, column=colonna, sticky="nsew", padx=6)
+            gruppo.grid(row=0, column=colonna, sticky="nsew", padx=5)
             squadre_frame.columnconfigure(colonna, weight=1)
-
             for nome in nomi:
                 bottone = ttk.Button(
                     gruppo,
                     text=nome,
-                    command=lambda n=nome: self._apri_inserimento(n),
+                    command=lambda n=nome: self._seleziona_giocatore(n),
                 )
-                bottone.pack(fill="x", pady=5, ipady=7)
+                bottone.pack(fill="x", pady=3, ipady=5)
                 self.bottoni_giocatori[nome] = bottone
 
-        istruzioni = (
-            "Per ogni colpo: scegli prima il colpo. Se lo scambio prosegue, premi "
-            "'Continua scambio'. Se il colpo chiude il punto, seleziona l'esito e "
-            "premi 'Chiudi punto'. Solo la chiusura del punto aggiorna il punteggio."
-        )
-        ttk.Label(
+        self.label_selezione = ttk.Label(
             self.root,
-            text=istruzioni,
-            wraplength=900,
-            justify="center",
-        ).pack(padx=20, pady=(10, 6))
+            text="Passo 1: seleziona un giocatore.",
+            font=("TkDefaultFont", 11, "bold"),
+            anchor="center",
+        )
+        self.label_selezione.pack(fill="x", padx=16, pady=(5, 3))
+
+        colpi_frame = ttk.LabelFrame(self.root, text="Colpo eseguito — premi un solo pulsante", padding=8)
+        colpi_frame.pack(fill="x", padx=16, pady=4)
+        self.bottoni_colpi = {}
+        for indice, colpo in enumerate(COLPI):
+            riga, colonna = divmod(indice, 4)
+            bottone = ttk.Button(
+                colpi_frame,
+                text=colpo,
+                command=lambda c=colpo: self._registra_colpo_selezionato(c),
+                width=23,
+            )
+            bottone.grid(row=riga, column=colonna, sticky="ew", padx=4, pady=3, ipady=4)
+            colpi_frame.columnconfigure(colonna, weight=1)
+            self.bottoni_colpi[colpo] = bottone
 
         self.label_scambio = ttk.Label(
             self.root,
-            text="Scambio in corso: nessun colpo registrato",
-            font=("TkDefaultFont", 11, "bold"),
-            wraplength=900,
+            text="Scambio in corso: nessun colpo registrato.",
+            font=("TkDefaultFont", 10),
+            wraplength=1000,
             justify="center",
         )
-        self.label_scambio.pack(fill="x", padx=20, pady=7)
+        self.label_scambio.pack(fill="x", padx=18, pady=6)
+
+        esito_frame = ttk.LabelFrame(self.root, text="Fine punto — premi l'esito del colpo in attesa", padding=8)
+        esito_frame.pack(fill="x", padx=16, pady=5)
+        self.bottoni_esito = {}
+        for esito, etichetta in (
+            ("Winner", "WINNER"),
+            ("Errore forzato", "ERRORE FORZATO"),
+            ("Errore non forzato", "ERRORE NON FORZATO"),
+        ):
+            bottone = ttk.Button(
+                esito_frame,
+                text=etichetta,
+                command=lambda e=esito: self._gestisci_esito(e),
+                width=24,
+            )
+            bottone.pack(side="left", expand=True, fill="x", padx=4, ipady=6)
+            self.bottoni_esito[esito] = bottone
 
         azioni = ttk.Frame(self.root)
-        azioni.pack(pady=10)
-
+        azioni.pack(pady=(5, 10))
         self.bottone_annulla = ttk.Button(
-            azioni,
-            text="Annulla ultima azione",
-            command=self._annulla_ultima_azione,
+            azioni, text="Annulla ultima azione", command=self._annulla_ultima_azione
         )
-        self.bottone_annulla.grid(row=0, column=0, padx=5, pady=4)
-
+        self.bottone_annulla.grid(row=0, column=0, padx=5, pady=3)
         ttk.Button(
-            azioni,
-            text="Visualizza statistiche",
-            command=self._mostra_statistiche,
-        ).grid(row=0, column=1, padx=5, pady=4)
-
+            azioni, text="Visualizza statistiche", command=self._mostra_statistiche
+        ).grid(row=0, column=1, padx=5, pady=3)
         ttk.Button(
-            azioni,
-            text="Esporta statistiche JSON",
-            command=self._esporta_json,
-        ).grid(row=0, column=2, padx=5, pady=4)
-
+            azioni, text="Esporta statistiche JSON", command=self._esporta_json
+        ).grid(row=0, column=2, padx=5, pady=3)
         ttk.Button(azioni, text="Esci", command=self.root.destroy).grid(
-            row=0, column=3, padx=5, pady=4
+            row=0, column=3, padx=5, pady=3
         )
 
-    def _apri_inserimento(self, giocatore):
-        """Mostra prima il menu colpo e poi l'esito conclusivo facoltativo."""
+    def _seleziona_giocatore(self, giocatore):
+        """Seleziona chi esegue il prossimo colpo, senza registrare un'azione."""
         if self.partita_finita:
             return
+        self.giocatore_selezionato = giocatore
+        self._aggiorna_punteggio()
+
+    def _registra_colpo_selezionato(self, colpo):
+        """Registra il colpo selezionato; il precedente diventa un colpo in gioco."""
+        if self.partita_finita:
+            return
+        if self.giocatore_selezionato not in self.giocatori:
+            messagebox.showwarning(
+                "Seleziona un giocatore",
+                "Prima premi il pulsante del giocatore che ha eseguito il colpo.",
+                parent=self.root,
+            )
+            return
+        if colpo not in COLPI:
+            return
+
+        snapshot = self._snapshot()
+        if self.azione_in_attesa is None:
+            self._inizia_scambio_se_necessario()
+        else:
+            precedente = self.azione_in_attesa
+            self.stats[precedente["giocatore"]][ESITO_IN_GIOCO][precedente["colpo"]] += 1
+            self.scambio_corrente.append({
+                "numero_azione_nello_scambio": len(self.scambio_corrente) + 1,
+                "giocatore": precedente["giocatore"],
+                "colpo": precedente["colpo"],
+                "esito": ESITO_IN_GIOCO,
+                "punto_concluso": False,
+            })
+
+        giocatore = self.giocatore_selezionato
+        self.azione_in_attesa = {
+            "numero_azione_nello_scambio": len(self.scambio_corrente) + 1,
+            "giocatore": giocatore,
+            "colpo": colpo,
+            "esito": "In attesa di esito",
+            "punto_concluso": False,
+        }
+        self._undo_stack.append({
+            "snapshot": snapshot,
+            "descrizione": f"{giocatore} — {colpo}",
+        })
+        # Ogni colpo richiede una selezione esplicita del giocatore, così si
+        # riduce il rischio di attribuire per errore un colpo al compagno.
+        self.giocatore_selezionato = None
+        self._aggiorna_punteggio()
+
+    def _gestisci_esito(self, esito):
+        """Chiude il punto usando il colpo in attesa come colpo decisivo."""
+        if self.partita_finita:
+            return
+        if not self.azione_in_attesa:
+            messagebox.showwarning(
+                "Nessun colpo da chiudere",
+                "Seleziona un giocatore e premi il pulsante del colpo prima di assegnare l'esito.",
+                parent=self.root,
+            )
+            return
+        if esito == "Winner":
+            self._chiedi_assist_winner()
+        elif esito in ("Errore forzato", "Errore non forzato"):
+            self._concludi_punto(esito)
+
+    def _chiedi_assist_winner(self):
+        """Consente di scegliere l'assist soltanto durante la chiusura con Winner."""
+        if not self.azione_in_attesa:
+            return
+        giocatore = self.azione_in_attesa["giocatore"]
+        colpo = self.azione_in_attesa["colpo"]
+        squadra = self.squadra_giocatore[giocatore]
+        compagni = [
+            nome for nome in self.giocatori
+            if self.squadra_giocatore[nome] == squadra and nome != giocatore
+        ]
 
         finestra = tk.Toplevel(self.root)
-        finestra.title(f"Registra colpo — {giocatore}")
+        finestra.title("Winner — assist facoltativo")
         finestra.transient(self.root)
         finestra.grab_set()
         finestra.resizable(False, False)
-
-        contenuto = ttk.Frame(finestra, padding=18)
+        contenuto = ttk.Frame(finestra, padding=16)
         contenuto.pack(fill="both", expand=True)
-
         ttk.Label(
             contenuto,
-            text=f"Giocatore: {giocatore}",
-            font=("TkDefaultFont", 12, "bold"),
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+            text=f"{giocatore} — {colpo}\nVuoi attribuire un assist al compagno?",
+            font=("TkDefaultFont", 11, "bold"),
+            justify="center",
+        ).pack(pady=(0, 12))
 
-        ttk.Label(contenuto, text="1. Colpo eseguito:").grid(
-            row=1, column=0, sticky="w", pady=7, padx=(0, 12)
-        )
-        colpo_var = tk.StringVar(value=COLPI[0])
-        menu_colpo = ttk.Combobox(
-            contenuto,
-            textvariable=colpo_var,
-            values=COLPI,
-            state="readonly",
-            width=28,
-        )
-        menu_colpo.grid(row=1, column=1, sticky="ew", pady=7)
-
-        ttk.Label(contenuto, text="2. Esito (solo se il punto finisce):").grid(
-            row=2, column=0, sticky="w", pady=7, padx=(0, 12)
-        )
-        esito_var = tk.StringVar(value="")
-        menu_esito = ttk.Combobox(
-            contenuto,
-            textvariable=esito_var,
-            values=("", *ESITI),
-            state="readonly",
-            width=28,
-        )
-        menu_esito.grid(row=2, column=1, sticky="ew", pady=7)
-
-        ttk.Label(
-            contenuto,
-            text=(
-                "Continua scambio = il colpo resta in gioco e non assegna punti.\n"
-                "Chiudi punto = registra Winner/Errore e aggiorna il punteggio."
-            ),
-            justify="left",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 12))
-
-        def continua_scambio():
-            colpo = colpo_var.get()
-            if colpo not in COLPI:
-                messagebox.showwarning(
-                    "Colpo mancante", "Seleziona il colpo eseguito.", parent=finestra
-                )
-                return
-            if esito_var.get():
-                messagebox.showwarning(
-                    "Scegli come registrare il colpo",
-                    "Hai selezionato un esito finale. Per proseguire lo scambio, "
-                    "svuota il menu Esito; per assegnare il punto, premi 'Chiudi punto'.",
-                    parent=finestra,
-                )
-                return
-            self._registra_colpo_in_gioco(giocatore, colpo)
-            finestra.destroy()
-
-        def chiudi_punto():
-            colpo = colpo_var.get()
-            esito = esito_var.get()
-            if colpo not in COLPI:
-                messagebox.showwarning(
-                    "Colpo mancante", "Seleziona il colpo eseguito.", parent=finestra
-                )
-                return
-            if esito not in ESITI:
-                messagebox.showwarning(
-                    "Esito mancante",
-                    "Seleziona Winner, Errore forzato o Errore non forzato.",
-                    parent=finestra,
-                )
-                return
-            self._concludi_punto(giocatore, esito, colpo)
-            finestra.destroy()
-
-        pulsanti = ttk.Frame(contenuto)
-        pulsanti.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(
-            pulsanti, text="Annulla", command=finestra.destroy
-        ).pack(side="right", padx=(6, 0))
-        ttk.Button(
-            pulsanti, text="Chiudi punto", command=chiudi_punto
-        ).pack(side="right", padx=(6, 0))
-        ttk.Button(
-            pulsanti, text="Continua scambio", command=continua_scambio
-        ).pack(side="right")
-        menu_colpo.focus_set()
+            contenuto,
+            text="Winner senza assist",
+            command=lambda: self._concludi_da_finestra_assist(finestra, None),
+        ).pack(fill="x", pady=3)
+        for compagno in compagni:
+            ttk.Button(
+                contenuto,
+                text=f"Winner con assist di {compagno}",
+                command=lambda c=compagno: self._concludi_da_finestra_assist(finestra, c),
+            ).pack(fill="x", pady=3)
+        ttk.Button(contenuto, text="Annulla", command=finestra.destroy).pack(pady=(8, 0))
+
+    def _concludi_da_finestra_assist(self, finestra, assistente):
+        try:
+            finestra.grab_release()
+        except tk.TclError:
+            pass
+        finestra.destroy()
+        self._concludi_punto("Winner", assistente=assistente)
 
     def _snapshot(self):
-        """Copia lo stato mutabile necessario per annullare una singola azione."""
+        """Copia lo stato necessario per annullare l'ultima azione."""
         return {
             "stats": copy.deepcopy(self.stats),
             "punti": self.punti.copy(),
@@ -325,8 +370,13 @@ class PadelTracker:
             "partita_finita": self.partita_finita,
             "cronologia_punti": copy.deepcopy(self.cronologia_punti),
             "scambio_corrente": copy.deepcopy(self.scambio_corrente),
+            "azione_in_attesa": copy.deepcopy(self.azione_in_attesa),
+            "giocatore_selezionato": self.giocatore_selezionato,
             "punteggio_prima_scambio": copy.deepcopy(self.punteggio_prima_scambio),
             "server_del_punto": self.server_del_punto,
+            "lato_servizio_corrente": self.lato_servizio_corrente,
+            "lato_servizio_del_punto": self.lato_servizio_del_punto,
+            "assist_stats": copy.deepcopy(self.assist_stats),
         }
 
     def _ripristina_snapshot(self, snapshot):
@@ -342,71 +392,91 @@ class PadelTracker:
         self.partita_finita = snapshot["partita_finita"]
         self.cronologia_punti = copy.deepcopy(snapshot["cronologia_punti"])
         self.scambio_corrente = copy.deepcopy(snapshot["scambio_corrente"])
+        self.azione_in_attesa = copy.deepcopy(snapshot.get("azione_in_attesa"))
+        self.giocatore_selezionato = snapshot.get("giocatore_selezionato")
         self.punteggio_prima_scambio = copy.deepcopy(snapshot["punteggio_prima_scambio"])
         self.server_del_punto = snapshot.get("server_del_punto")
+        self.lato_servizio_corrente = snapshot.get("lato_servizio_corrente", "Destra")
+        self.lato_servizio_del_punto = snapshot.get("lato_servizio_del_punto")
+        self.assist_stats = copy.deepcopy(snapshot.get("assist_stats", self.assist_stats))
+
+    def _giocatore_in_risposta(self, giocatore_al_servizio, lato_servizio):
+        """Il ricevitore è il giocatore della coppia avversaria sul lato del servizio."""
+        squadra_servizio = self.squadra_giocatore[giocatore_al_servizio]
+        squadra_risposta = 1 - squadra_servizio
+        ricevitori = [
+            nome for nome in self.giocatori
+            if self.squadra_giocatore[nome] == squadra_risposta
+            and self.lati_giocatori.get(nome) == lato_servizio
+        ]
+        return ricevitori[0] if len(ricevitori) == 1 else None
 
     def _inizia_scambio_se_necessario(self):
-        if not self.scambio_corrente and self.punteggio_prima_scambio is None:
+        if not self.scambio_corrente and self.azione_in_attesa is None and self.punteggio_prima_scambio is None:
             self.punteggio_prima_scambio = self._stato_punteggio()
             self.server_del_punto = self.server_var.get()
+            self.lato_servizio_del_punto = self.lato_servizio_corrente
 
-    def _registra_colpo_in_gioco(self, giocatore, colpo):
-        """Registra un colpo intermedio senza assegnare il punto."""
-        if self.partita_finita:
+    def _concludi_punto(self, esito, assistente=None):
+        """Conclude il punto usando l'ultimo colpo premuto come azione decisiva."""
+        if self.partita_finita or not self.azione_in_attesa:
             return
 
         snapshot = self._snapshot()
+        azione_finale_pendente = copy.deepcopy(self.azione_in_attesa)
+        giocatore = azione_finale_pendente["giocatore"]
+        colpo = azione_finale_pendente["colpo"]
         self._inizia_scambio_se_necessario()
-        self.stats[giocatore][ESITO_IN_GIOCO][colpo] += 1
-        self.scambio_corrente.append({
-            "numero_azione_nello_scambio": len(self.scambio_corrente) + 1,
-            "giocatore": giocatore,
-            "colpo": colpo,
-            "esito": ESITO_IN_GIOCO,
-            "punto_concluso": False,
-        })
-        self._undo_stack.append({
-            "snapshot": snapshot,
-            "descrizione": f"{giocatore} — {ESITO_IN_GIOCO} — {colpo}",
-        })
-        self._aggiorna_punteggio()
-
-    def _concludi_punto(self, giocatore, esito, colpo):
-        """Registra il colpo decisivo, assegna il punto e salva il rally completo."""
-        if self.partita_finita:
-            return
-
-        snapshot = self._snapshot()
-        self._inizia_scambio_se_necessario()
-        stato_prima_punto = copy.deepcopy(self.punteggio_prima_scambio)
+        stato_prima_punto = copy.deepcopy(self.punteggio_prima_scambio or self._stato_punteggio())
         numero_set_completati_prima = len(self.set_scores)
 
         self.stats[giocatore][esito][colpo] += 1
         squadra_giocatore = self.squadra_giocatore[giocatore]
         squadra_punto = squadra_giocatore if esito == "Winner" else 1 - squadra_giocatore
+        if esito != "Winner":
+            assistente = None
+        if assistente and (
+            assistente not in self.giocatori
+            or assistente == giocatore
+            or self.squadra_giocatore.get(assistente) != squadra_giocatore
+        ):
+            assistente = None
+        if assistente:
+            self.assist_stats[assistente] = self.assist_stats.get(assistente, 0) + 1
+
         giocatore_al_servizio = self.server_del_punto or self.server_var.get()
+        lato_servizio = self.lato_servizio_del_punto or self.lato_servizio_corrente
         squadra_servizio_idx = self.squadra_giocatore[giocatore_al_servizio]
         squadra_al_servizio = NOMI_SQUADRE[squadra_servizio_idx]
+        giocatore_in_risposta = self._giocatore_in_risposta(giocatore_al_servizio, lato_servizio)
+        squadra_in_risposta_idx = 1 - squadra_servizio_idx
+        squadra_in_risposta = NOMI_SQUADRE[squadra_in_risposta_idx]
+        games_prima = self.games.copy()
 
         azione_finale = {
             "numero_azione_nello_scambio": len(self.scambio_corrente) + 1,
             "giocatore": giocatore,
             "colpo": colpo,
             "esito": esito,
+            "assistente": assistente,
             "punto_concluso": True,
         }
-        self.scambio_corrente.append(azione_finale)
+        azioni_scambio = copy.deepcopy(self.scambio_corrente) + [copy.deepcopy(azione_finale)]
 
         self._assegna_punto(squadra_punto)
+        # La direzione di battuta alterna automaticamente. Dopo un game/set riparte da Destra.
+        if self.games != games_prima or len(self.set_scores) > numero_set_completati_prima:
+            self.lato_servizio_corrente = "Destra"
+        else:
+            self.lato_servizio_corrente = "Sinistra" if lato_servizio == "Destra" else "Destra"
         stato_dopo = self._stato_punteggio()
         numero_punto = len(self.cronologia_punti) + 1
 
-        # Una sola riga per punto, comoda da filtrare e importare in Excel.
         riga = (
             f"{stato_prima_punto['punti_game']} | {stato_prima_punto['game']} | "
             f"{stato_prima_punto['set']} | {giocatore} | {esito} | {colpo}"
+            + (f" | Assist: {assistente}" if assistente else "")
         )
-        azioni_scambio = copy.deepcopy(self.scambio_corrente)
         riepilogo_scambio = " -> ".join(
             f"{azione['giocatore']}: {azione['colpo']} ({azione['esito']})"
             for azione in azioni_scambio
@@ -421,11 +491,19 @@ class PadelTracker:
             "giocatore": giocatore,
             "esito": esito,
             "colpo": colpo,
+            "assistente": assistente,
             "squadra_che_fa_punto": NOMI_SQUADRE[squadra_punto],
             "giocatore_al_servizio": giocatore_al_servizio,
             "squadra_al_servizio": squadra_al_servizio,
+            "lato_servizio": lato_servizio,
+            "giocatore_in_risposta": giocatore_in_risposta,
+            "squadra_in_risposta": squadra_in_risposta,
             "punto_vinto_in_servizio": squadra_punto == squadra_servizio_idx,
             "punto_vinto_in_risposta": squadra_punto != squadra_servizio_idx,
+            "punto_vinto_in_risposta_da_giocatore": bool(
+                giocatore_in_risposta
+                and squadra_punto == self.squadra_giocatore[giocatore_in_risposta]
+            ),
             "punteggio_dopo": stato_dopo,
         }
         if len(self.set_scores) > numero_set_completati_prima:
@@ -433,11 +511,14 @@ class PadelTracker:
 
         self.cronologia_punti.append(record)
         self.scambio_corrente = []
+        self.azione_in_attesa = None
+        self.giocatore_selezionato = None
         self.punteggio_prima_scambio = None
         self.server_del_punto = None
+        self.lato_servizio_del_punto = None
         self._undo_stack.append({
             "snapshot": snapshot,
-            "descrizione": f"{giocatore} — {esito} — {colpo}",
+            "descrizione": f"{giocatore} — {esito} — {colpo}" + (f" — assist a {assistente}" if assistente else ""),
         })
         self._aggiorna_punteggio()
 
@@ -587,30 +668,52 @@ class PadelTracker:
         elif self.star_point_pending:
             stato = "Star Point: il prossimo punto assegna il game"
         else:
-            stato = "Sistema Star Point: due vantaggi, poi punto decisivo"
+            stato = "Star Point: dopo due vantaggi si gioca un punto decisivo"
         self.label_stato.configure(text=stato)
 
-        if self.scambio_corrente:
-            descrizione = " → ".join(
-                f"{azione['giocatore']}: {azione['colpo']}"
-                for azione in self.scambio_corrente
-            )
-            self.label_scambio.configure(
-                text=f"Scambio in corso ({len(self.scambio_corrente)} colpi): {descrizione}"
+        if self.giocatore_selezionato:
+            self.label_selezione.configure(
+                text=f"Giocatore selezionato: {self.giocatore_selezionato}. Ora premi il pulsante del colpo."
             )
         else:
-            self.label_scambio.configure(text="Scambio in corso: nessun colpo registrato")
+            self.label_selezione.configure(text="Passo 1: seleziona un giocatore.")
 
-        stato_bottoni = "disabled" if self.partita_finita else "normal"
-        for bottone in self.bottoni_giocatori.values():
-            bottone.configure(state=stato_bottoni)
-        self.bottone_annulla.configure(
-            state="normal" if self._undo_stack else "disabled"
-        )
-        # Il battitore resta fisso per tutto il punto.
-        self.menu_server.configure(
-            state="disabled" if self.scambio_corrente else "readonly"
-        )
+        azioni_visibili = list(self.scambio_corrente)
+        if self.azione_in_attesa:
+            azioni_visibili.append(self.azione_in_attesa)
+        if azioni_visibili:
+            descrizione = " → ".join(
+                f"{azione['giocatore']}: {azione['colpo']}"
+                for azione in azioni_visibili
+            )
+            attesa = ""
+            if self.azione_in_attesa:
+                attesa = (
+                    f"\nEsito finale da attribuire a: {self.azione_in_attesa['giocatore']} — "
+                    f"{self.azione_in_attesa['colpo']}"
+                )
+            self.label_scambio.configure(
+                text=f"Scambio in corso ({len(azioni_visibili)} colpi): {descrizione}{attesa}"
+            )
+        else:
+            self.label_scambio.configure(text="Scambio in corso: nessun colpo registrato.")
+
+        partita_attiva = not self.partita_finita
+        for nome, bottone in self.bottoni_giocatori.items():
+            prefisso = "▶ " if nome == self.giocatore_selezionato else ""
+            bottone.configure(text=f"{prefisso}{nome}", state="normal" if partita_attiva else "disabled")
+        for bottone in self.bottoni_colpi.values():
+            bottone.configure(
+                state="normal" if partita_attiva and self.giocatore_selezionato else "disabled"
+            )
+        for bottone in self.bottoni_esito.values():
+            bottone.configure(
+                state="normal" if partita_attiva and self.azione_in_attesa else "disabled"
+            )
+        self.bottone_annulla.configure(state="normal" if self._undo_stack else "disabled")
+        # Il battitore si può aggiornare solo tra i punti, non durante uno scambio.
+        scambio_attivo = bool(self.scambio_corrente or self.azione_in_attesa)
+        self.menu_server.configure(state="disabled" if scambio_attivo or self.partita_finita else "readonly")
 
     def _annulla_ultima_azione(self):
         """Annulla l'ultima azione (colpo intermedio o chiusura del punto)."""
@@ -688,13 +791,17 @@ class PadelTracker:
                 "set_completati": self.set_scores,
                 "partita_finita": self.partita_finita,
             },
+            "lati_giocatori": self.lati_giocatori,
+            "assist_aggregate": self.assist_stats,
             "statistiche_aggregate": self.stats,
             "impostazioni_servizio": {
-                "metodo": "Selezione manuale del giocatore al servizio per ogni game",
+                "metodo": "Selezione del giocatore al servizio manuale; il lato di battuta alterna automaticamente",
                 "giocatore_selezionato_per_prossimo_punto": self.server_var.get(),
+                "alternanza_lato": "Automatica: Destra/Sinistra alternati a ogni punto; nei game nuovi si riparte da Destra",
+                "metodo_individuazione_risposta": "Il ricevitore è ricavato dal lato di battuta alternato e dalla configurazione LATI_GIOCATORI_DEFAULT in cima al file",
                 "nota": (
-                    "Per analizzare servizio e risposta, selezionare il giocatore che serve "
-                    "all'inizio di ogni game. Il battitore è registrato su ogni punto concluso."
+                    "Il lato di battuta non è selezionabile dall'interfaccia. Per attribuire i punti in risposta al singolo giocatore, "
+                    "modificare LATI_GIOCATORI_DEFAULT in cima al file se la coppia cambia lato abituale."
                 ),
             },
             "cronologia_punti": {
@@ -712,10 +819,15 @@ class PadelTracker:
                     "esito",
                     "colpo",
                     "squadra_che_fa_punto",
+                    "assistente",
                     "giocatore_al_servizio",
                     "squadra_al_servizio",
+                    "lato_servizio",
+                    "giocatore_in_risposta",
+                    "squadra_in_risposta",
                     "punto_vinto_in_servizio",
                     "punto_vinto_in_risposta",
+                    "punto_vinto_in_risposta_da_giocatore",
                     "punteggio_dopo",
                     "set_completato_in_questa_azione",
                 ],
@@ -723,8 +835,8 @@ class PadelTracker:
             },
             "scambio_in_corso": {
                 "punteggio_iniziale": self.punteggio_prima_scambio,
-                "azioni": self.scambio_corrente,
-                "nota": "Azioni non ancora concluse in un punto; non assegnano punti finché lo scambio non viene chiuso.",
+                "azioni": self.scambio_corrente + ([self.azione_in_attesa] if self.azione_in_attesa else []),
+                "nota": "Lo scambio comprende i colpi confermati e, se presente, l'ultimo colpo in attesa di Winner/Errore. Nessun punto viene assegnato finché non si preme un esito.",
             },
         }
 
