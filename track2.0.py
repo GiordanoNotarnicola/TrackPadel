@@ -14,8 +14,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 # Configurazione partita: modifica i nomi e la lista dei colpi qui.
-SQUADRA_1 = ["Graziotti", "Iacovino"]
-SQUADRA_2 = ["Chamero", "Ayats"]
+SQUADRA_1 = ["Giulio Graziotti", "Iacovino"]
+SQUADRA_2 = ["Giocatore 3", "Giocatore 4"]
 NOMI_SQUADRE = ["Casa", "Fuori"]
 # Configurazione fissa dei lati per distinguere il ricevitore nelle statistiche.
 # Non è modificabile dalla finestra di tracking.
@@ -873,4 +873,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
