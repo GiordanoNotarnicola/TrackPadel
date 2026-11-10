@@ -1,0 +1,25 @@
+# Ambiente virtuale
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Video e dataset
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Modelli
+models/*
+
+# Output
+output/*
+
+# VS Code
+.vscode/
+
+# File temporanei
+.DS_Store
